@@ -1,0 +1,123 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function validTextProposal() {
+      return request.resource.data.proposal_text is string
+        && request.resource.data.proposal_text.size() > 0
+        && request.resource.data.proposal_text.size() <= 6000;
+    }
+
+    match /proposal_groups/{groupId} {
+      allow get: if signedIn() || resource.data.status == 'voting';
+      allow list: if resource.data.status == 'voting';
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'foreign_word',
+          'normalized_foreign_word',
+          'first_letter',
+          'origin',
+          'addendum',
+          'type',
+          'proposal_format',
+          'status',
+          'created_by',
+          'created_at'
+        ])
+        && request.resource.data.foreign_word is string
+        && request.resource.data.foreign_word.size() > 0
+        && request.resource.data.foreign_word.size() <= 120
+        && request.resource.data.normalized_foreign_word is string
+        && request.resource.data.normalized_foreign_word.size() > 0
+        && request.resource.data.first_letter is string
+        && request.resource.data.first_letter.size() > 0
+        && request.resource.data.origin is string
+        && request.resource.data.origin.size() <= 1000
+        && request.resource.data.addendum is string
+        && request.resource.data.addendum.size() <= 4000
+        && request.resource.data.type in ['new_word', 'edit_word']
+        && request.resource.data.proposal_format == 'text'
+        && request.resource.data.status == 'pending'
+        && request.resource.data.created_by == request.auth.uid;
+
+      allow update, delete: if false;
+
+      match /options/{optionId} {
+        allow get: if signedIn()
+          || (
+            resource.data.status == 'approved'
+            && get(/databases/$(database)/documents/proposal_groups/$(groupId)).data.status == 'voting'
+          );
+
+        allow list: if resource.data.status == 'approved'
+          && get(/databases/$(database)/documents/proposal_groups/$(groupId)).data.status == 'voting';
+
+        allow create: if signedIn()
+          && request.resource.data.keys().hasOnly([
+            'proposal_text',
+            'type',
+            'votes_count',
+            'status',
+            'created_by',
+            'created_at'
+          ])
+          && validTextProposal()
+          && request.resource.data.type in ['new_word', 'edit_word']
+          && request.resource.data.votes_count == 0
+          && request.resource.data.status == 'pending'
+          && request.resource.data.created_by == request.auth.uid;
+
+        allow update: if signedIn()
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['votes_count'])
+          && resource.data.status == 'approved'
+          && request.resource.data.votes_count == resource.data.votes_count + 1
+          && existsAfter(/databases/$(database)/documents/proposal_groups/$(groupId)/votes/$(request.auth.uid))
+          && getAfter(/databases/$(database)/documents/proposal_groups/$(groupId)/votes/$(request.auth.uid)).data.option_id == optionId;
+
+        allow delete: if false;
+
+        match /reports/{userId} {
+          allow get: if signedIn() && request.auth.uid == userId;
+          allow list: if false;
+
+          allow create: if signedIn()
+            && request.auth.uid == userId
+            && !exists(/databases/$(database)/documents/proposal_groups/$(groupId)/options/$(optionId)/reports/$(userId))
+            && request.resource.data.keys().hasOnly(['user_id', 'reported_author_id', 'reason', 'created_at'])
+            && request.resource.data.user_id == request.auth.uid
+            && request.resource.data.reported_author_id is string
+            && request.resource.data.reported_author_id.size() > 0
+            && request.resource.data.reported_author_id.size() <= 128
+            && request.resource.data.reason is string
+            && request.resource.data.reason.size() <= 300
+            && get(/databases/$(database)/documents/proposal_groups/$(groupId)).data.status == 'voting'
+            && get(/databases/$(database)/documents/proposal_groups/$(groupId)/options/$(optionId)).data.status == 'approved'
+            && request.resource.data.reported_author_id ==
+              get(/databases/$(database)/documents/proposal_groups/$(groupId)/options/$(optionId)).data.created_by;
+
+          allow update, delete: if false;
+        }
+      }
+
+      match /votes/{userId} {
+        allow get: if signedIn() && request.auth.uid == userId;
+        allow list: if false;
+
+        allow create: if signedIn()
+          && request.auth.uid == userId
+          && !exists(/databases/$(database)/documents/proposal_groups/$(groupId)/votes/$(userId))
+          && request.resource.data.keys().hasOnly(['option_id', 'user_id', 'created_at'])
+          && request.resource.data.user_id == request.auth.uid
+          && get(/databases/$(database)/documents/proposal_groups/$(groupId)).data.status == 'voting'
+          && get(/databases/$(database)/documents/proposal_groups/$(groupId)/options/$(request.resource.data.option_id)).data.status == 'approved';
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}
