@@ -1,3 +1,7 @@
+---
+title: Play Store Data safety подсетник
+---
+
 # Play Store Data safety подсетник
 
 Овај фајл је подсетник за попуњавање Google Play Console `Data safety`
