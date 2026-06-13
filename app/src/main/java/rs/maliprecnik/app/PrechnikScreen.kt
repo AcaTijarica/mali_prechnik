@@ -436,7 +436,7 @@ fun PrechnikScreen(
                         .padding(innerPadding)
                 )
 
-                AppScreen.Gratitude -> GratitudeScreen(
+                AppScreen.Notifications -> NotificationsScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)

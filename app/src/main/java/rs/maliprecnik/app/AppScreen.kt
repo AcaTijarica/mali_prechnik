@@ -4,12 +4,12 @@ package rs.maliprecnik.app
 enum class AppScreen(val title: String) {
     Search("Претрага"),
     Voting("Гласање"),
-    AddWord("Додавање речи"),
+    AddWord("Додај реч"),
     EditWord("Измена речи"),
     ForeignWord("Туђица"),
     ForeignWords("Туђице"),
     Storage("Складиште"),
-    Gratitude("Захвалница"),
+    Notifications("Обавештења"),
     Idea("Замисао"),
     PrivacyRules("Правила и приватност")
 }

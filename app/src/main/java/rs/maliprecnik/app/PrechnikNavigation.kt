@@ -54,7 +54,7 @@ fun PrechnikTopBar(
     }
 }
 
-/** Леви мени. Информативне странице су издвојене на врх, а радни екрани следе испод њих. */
+/** Леви мени. Радни екрани су на врху, а информативне странице при дну. */
 @Composable
 fun PrechnikDrawer(
     currentScreen: AppScreen,
@@ -68,22 +68,6 @@ fun PrechnikDrawer(
             modifier = Modifier.padding(horizontal = 28.dp, vertical = 24.dp),
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold
-        )
-        HorizontalDivider()
-        DrawerItem(
-            label = "Захвалница",
-            selected = currentScreen == AppScreen.Gratitude,
-            onClick = { onNavigate(AppScreen.Gratitude) }
-        )
-        DrawerItem(
-            label = "Замисао",
-            selected = currentScreen == AppScreen.Idea,
-            onClick = { onNavigate(AppScreen.Idea) }
-        )
-        DrawerItem(
-            label = "Правила и приватност",
-            selected = currentScreen == AppScreen.PrivacyRules,
-            onClick = { onNavigate(AppScreen.PrivacyRules) }
         )
         HorizontalDivider()
         DrawerItem(
@@ -102,7 +86,7 @@ fun PrechnikDrawer(
             onClick = { onNavigate(AppScreen.Voting) }
         )
         DrawerItem(
-            label = "Додавање речи",
+            label = "Додај реч",
             selected = currentScreen == AppScreen.AddWord,
             onClick = { onNavigate(AppScreen.AddWord) }
         )
@@ -110,6 +94,22 @@ fun PrechnikDrawer(
             label = "Складиште",
             selected = currentScreen == AppScreen.Storage,
             onClick = { onNavigate(AppScreen.Storage) }
+        )
+        HorizontalDivider()
+        DrawerItem(
+            label = "Замисао",
+            selected = currentScreen == AppScreen.Idea,
+            onClick = { onNavigate(AppScreen.Idea) }
+        )
+        DrawerItem(
+            label = "Обавештења",
+            selected = currentScreen == AppScreen.Notifications,
+            onClick = { onNavigate(AppScreen.Notifications) }
+        )
+        DrawerItem(
+            label = "Правила и приватност",
+            selected = currentScreen == AppScreen.PrivacyRules,
+            onClick = { onNavigate(AppScreen.PrivacyRules) }
         )
     }
 }
