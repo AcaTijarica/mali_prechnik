@@ -1,0 +1,12 @@
+{
+  "notifications": [
+    {
+      "id": "2026-07-14-pocetno-obavestenje",
+      "title": "Почетно обавештење",
+      "author": "Уредништво",
+      "published_at": "2026-07-14T12:00:00+02:00",
+      "status": "published",
+      "body": "Ово је пример обавештења. Текст може да садржи **подебљане** и _искошене_ делове, као и пуну интернет везу, на пример https://github.com/AcaTijarica/mali_prechnik."
+    }
+  ]
+}

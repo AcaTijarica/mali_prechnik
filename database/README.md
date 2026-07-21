@@ -1,10 +1,11 @@
 # База и Firebase за Мали пречник
 
 Овај директоријум садржи све што је потребно за службену базу, Firestore
-предлоге, гласање и уреднички ток.
+предлоге, гласање, обавештења и уреднички ток.
 
 Android апликација ради са локалном SQLite базом. Firestore није главна база
-речника; Firestore служи само за предлоге корисника и гласање.
+речника; Firestore служи за предлоге корисника, гласање и уредничка
+обавештења.
 
 ## Зашто није Google Sheet
 
@@ -14,13 +15,14 @@ Firestore:
 - више корисника може истовремено да шаље предлоге;
 - Android апликација може директно да упише предлог;
 - корисници могу да гласају из саме апликације;
+- уредник може да објављује кратка обавештења без нове APK/AAB верзије;
 - Firestore правила могу да ограниче ко и шта сме да уписује;
 - уредник и даље ручно одобрава предлоге пре него што уђу у службену базу.
 
 Због тога је коначни ток:
 
 1. SQLite остаје службена локална база у апликацији.
-2. Firestore чува само предлоге и гласове.
+2. Firestore чува предлоге, гласове и објављена обавештења.
 3. Python скрипта повлачи Firestore предлоге.
 4. Уредник ручно брише неприхваћене предлоге.
 5. Друга Python скрипта спаја прихваћене предлоге у службени JSON.
@@ -36,17 +38,18 @@ Firestore:
 - јавно складиште: `prechnik_seed.db` упакован у апликацију, који се освежава
   новим верзијама апликације.
 
-Када се апликација ажурира, лично складиште се не преписује само од себе.
+Оба складишта обухватају и туђице и засебан списак старих српских и словенских
+речи. Када се апликација ажурира, лично складиште се не преписује само од себе.
 Корисник на екрану `Складиште` може ручно:
 
 - да препише лично складиште јавним;
-- да дода само нове туђице из јавног складишта;
+- да дода само нове туђице и старе речи из јавног складишта;
 - да увезе или извезе JSON;
 - да увезе или извезе SQLite `.db`.
 
 ## Тренутна SQLite шема
 
-Шема је верзија `6`.
+Шема је верзија `8`.
 
 ```sql
 CREATE TABLE foreign_terms (
@@ -70,6 +73,27 @@ CREATE TABLE replacement_options (
         ON DELETE CASCADE,
     UNIQUE(foreign_term_id, normalized_replacement_word)
 );
+
+CREATE TABLE old_words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word TEXT NOT NULL,
+    normalized_word TEXT NOT NULL UNIQUE,
+    addendum TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE old_word_synonyms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_word_id INTEGER NOT NULL,
+    synonym TEXT NOT NULL,
+    normalized_synonym TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(old_word_id)
+        REFERENCES old_words(id)
+        ON DELETE CASCADE,
+    UNIQUE(old_word_id, normalized_synonym)
+);
 ```
 
 Једна туђица има:
@@ -89,7 +113,21 @@ CREATE TABLE replacement_options (
 database\input\official_entries.json
 ```
 
-Облик једне туђице:
+Корен службеног JSON-а има две независне листе:
+
+```json
+{
+  "format": "mali-precnik",
+  "version": 7,
+  "entries": [],
+  "stare_reci": []
+}
+```
+
+`entries` садржи туђице, а `stare_reci` старе речи. Стари JSON фајлови који
+имају само `entries` и даље могу да се увезу; тада је списак старих речи празан.
+
+Облик једне туђице у `entries`:
 
 ```json
 {
@@ -109,6 +147,19 @@ database\input\official_entries.json
 `dodatak` је један по туђици. Не уписује се уз сваки предлог.
 `tezina` је једна по српскословенском предлогу. Подразумевана вредност је `1`;
 ако за једну туђицу постоји више предлога, мања тежина се приказује пре веће.
+
+Стара реч се чува засебно од туђица:
+
+```json
+{
+  "stara_rec": "двиг",
+  "dodatak": "Означава излазак из себе и двиг ка нечему узвишеном.",
+  "slicnoznacnice": ["труд", "напор", "рад", "покрет"]
+}
+```
+
+Она нема порекло ни појединачна појашњења. Има само необавезни `dodatak` и
+једну или више `slicnoznacnice`, преко којих ради претрага савремене речи.
 
 ## Грађење службене seed базе
 
@@ -375,7 +426,7 @@ https://firebase.google.com/docs/firestore/security/rules-conditions
    ```
 
 2. Спустити је на телефон.
-3. Отворити `Додавање речи`.
+3. Отворити `Додај туђицу`.
 4. Унети пробну туђицу и бар један предлог.
 5. Кликнути `Предложи као нову реч`.
 6. Треба да се појави:
@@ -434,10 +485,42 @@ proposal_groups/{groupId}/options/{optionId}/reports/{userId}
   reported_author_id
   reason
   created_at
+
+notifications/{notificationId}
+  title
+  author
+  body
+  status
+  published_at
+  updated_at
 ```
 
 `groupId` је стабилан SHA-256 id нормализоване туђице.
 `optionId` је стабилан SHA-256 id комбинације туђице и текстуалног предлога.
+
+`notifications` је засебна колекција у истој Firestore бази. Android апликација
+чита само документе где је `status = published`. Уредник преко Python скрипте
+може да остави и `draft` или `hidden` обавештења, али она се не приказују
+корисницима.
+
+За обавештење се користи овај JSON облик:
+
+```json
+{
+  "id": "2026-07-14-pocetno-obavestenje",
+  "title": "Почетно обавештење",
+  "author": "Уредништво",
+  "published_at": "2026-07-14T12:00:00+02:00",
+  "status": "published",
+  "body": "Текст може да садржи **подебљано**, _искошено_, __подвучено__ и пуну интернет везу."
+}
+```
+
+Подржана стања су:
+
+- `published` - видљиво у Android апликацији;
+- `draft` - сачувано у Firestore-у, али није јавно видљиво;
+- `hidden` - сакривено, али није обрисано.
 
 ## Service account за уредничке Python скрипте
 
@@ -614,6 +697,83 @@ python database\scripts\build_seed_database.py --copy-to-android-assets
 2. изградити APK/AAB;
 3. тестирати локалну претрагу, складиште, предлоге и гласање;
 4. објавити нову верзију апликације.
+
+## Уреднички ток за обавештења
+
+Обавештења се не уграђују у APK. Налазе се у Firestore колекцији
+`notifications`, па корисници могу да их повуку притиском на `Освежи
+обавештења` у Android апликацији.
+
+### 1. Повлачење тренутних обавештења
+
+```powershell
+python database\scripts\fetch_firestore_notifications.py --service-account database\private\service-account.json
+```
+
+Ово прави или освежава:
+
+```powershell
+database\input\notifications.json
+```
+
+Ако је Firestore колекција још празна, може се кренути од постојећег пример
+фајла `database\input\notifications.json`.
+
+### 2. Ручно уређивање JSON-а
+
+Отворити:
+
+```powershell
+database\input\notifications.json
+```
+
+Додати ново обавештење у листу `notifications`, на пример:
+
+```json
+{
+  "id": "2026-07-14-novo-obavestenje",
+  "title": "Ново обавештење",
+  "author": "Уредништво",
+  "published_at": "2026-07-14T18:30:00+02:00",
+  "status": "published",
+  "body": "Овде иде писаније обавештења."
+}
+```
+
+`id` треба да буде стабилан и јединствен. Најпростији облик је датум и кратак
+опис латиницом без размака.
+
+### 3. Пробна провера
+
+```powershell
+python database\scripts\publish_firestore_notifications.py --service-account database\private\service-account.json --dry-run
+```
+
+Ово проверава JSON и исписује колико би обавештења било уписано, али не мења
+Firestore.
+
+### 4. Објављивање на Firestore
+
+```powershell
+python database\scripts\publish_firestore_notifications.py --service-account database\private\service-account.json
+```
+
+После овога корисници у апликацији могу да отворе `Обавештења` и притисну
+`Освежи обавештења`.
+
+### 5. Брисање обавештења
+
+Подразумевано, скрипта само уписује и освежава оно што постоји у JSON-у; не
+брише документе који су у Firestore-у, а нису више у JSON-у.
+
+Ако баш треба да се Firestore стање потпуно изједначи са JSON-ом:
+
+```powershell
+python database\scripts\publish_firestore_notifications.py --service-account database\private\service-account.json --delete-missing
+```
+
+Ово треба користити пажљиво. Често је мирније поставити `status = hidden`
+уместо брисања.
 
 ## Честе грешке
 

@@ -4,15 +4,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private const val JSON_FORMAT = "mali-precnik"
-private const val JSON_VERSION = 6
+private const val JSON_VERSION = 7
 
 /**
  * Извози локалну базу у JSON који чува релациону структуру:
  * једна туђица, па више засебних српскословенских предлога.
  */
-fun entriesToJson(entries: List<DictionaryEntry>): String {
+fun storageToJson(storage: DictionaryStorage): String {
     val entriesArray = JSONArray()
-    entries.forEach { entry ->
+    storage.entries.forEach { entry ->
         val optionsArray = JSONArray()
         entry.options.forEach { option ->
             optionsArray.put(
@@ -33,13 +33,31 @@ fun entriesToJson(entries: List<DictionaryEntry>): String {
         )
     }
 
+    val oldWordsArray = JSONArray()
+    storage.oldWords.forEach { oldWord ->
+        val synonymsArray = JSONArray()
+        oldWord.synonyms.forEach { synonym -> synonymsArray.put(synonym) }
+        oldWordsArray.put(
+            JSONObject()
+                .put("id", oldWord.id)
+                .put("stara_rec", oldWord.oldWord)
+                .put("dodatak", oldWord.addendum)
+                .put("slicnoznacnice", synonymsArray)
+        )
+    }
+
     return JSONObject()
         .put("format", JSON_FORMAT)
         .put("version", JSON_VERSION)
         .put("storage", "sqlite-relational")
         .put("entries", entriesArray)
+        .put("stare_reci", oldWordsArray)
         .toString(2)
 }
+
+/** Задржано за позиве којима треба извоз само постојећих туђица. */
+fun entriesToJson(entries: List<DictionaryEntry>): String =
+    storageToJson(DictionaryStorage(entries = entries))
 
 /**
  * Чита JSON из увоза.
@@ -47,22 +65,28 @@ fun entriesToJson(entries: List<DictionaryEntry>): String {
  * Нови формат користи поље `predlozi`. Ради лакшег преласка, читамо и стари
  * кључ `resenja`, као и раније пробне JSON облике.
  */
-fun entriesFromJson(json: String): List<DictionaryEntry> {
+fun storageFromJson(json: String): DictionaryStorage {
     val trimmedJson = json.trim()
-    val array = if (trimmedJson.startsWith("[")) {
+    val root = if (trimmedJson.startsWith("[")) {
+        null
+    } else {
+        JSONObject(trimmedJson)
+    }
+    val entriesArray = if (root == null) {
         JSONArray(trimmedJson)
     } else {
-        JSONObject(trimmedJson).getJSONArray("entries")
+        root.optJSONArray("entries")
+            ?: root.optJSONArray("tudjice")
+            ?: JSONArray()
     }
 
-    return buildList {
-        for (index in 0 until array.length()) {
-            val item = array.getJSONObject(index)
+    val entries = buildList {
+        for (index in 0 until entriesArray.length()) {
+            val item = entriesArray.getJSONObject(index)
             val foreignWord = item.optString("tudjica").trim()
             if (foreignWord.isBlank()) continue
 
             val options = optionsFromJson(item)
-            if (options.isEmpty()) continue
 
             add(
                 DictionaryEntry(
@@ -75,7 +99,33 @@ fun entriesFromJson(json: String): List<DictionaryEntry> {
             )
         }
     }
+
+    val oldWordsArray = root?.optJSONArray("stare_reci") ?: JSONArray()
+    val oldWords = buildList {
+        for (index in 0 until oldWordsArray.length()) {
+            val item = oldWordsArray.getJSONObject(index)
+            val oldWord = item.optString("stara_rec", item.optString("old_word")).trim()
+            if (oldWord.isBlank()) continue
+
+            val synonyms = synonymsFromJson(item)
+            if (synonyms.isEmpty()) continue
+
+            add(
+                OldWordEntry(
+                    id = item.optLong("id", 0),
+                    oldWord = oldWord,
+                    addendum = item.optString("dodatak", item.optString("addendum")).trim(),
+                    synonyms = synonyms
+                )
+            )
+        }
+    }
+
+    return DictionaryStorage(entries = entries, oldWords = oldWords)
 }
+
+fun entriesFromJson(json: String): List<DictionaryEntry> =
+    storageFromJson(json).entries
 
 private fun optionsFromJson(item: JSONObject): List<ReplacementOption> {
     val explicitOptions = item.optJSONArray("predlozi")
@@ -113,3 +163,24 @@ private fun optionsFromJson(item: JSONObject): List<ReplacementOption> {
 
 private fun optionWeightFromJson(option: JSONObject): Int =
     option.optInt("tezina", option.optInt("weight", 1)).coerceAtLeast(1)
+
+private fun synonymsFromJson(item: JSONObject): List<String> {
+    val explicitSynonyms = item.optJSONArray("slicnoznacnice")
+        ?: item.optJSONArray("synonyms")
+    val values = if (explicitSynonyms != null) {
+        buildList {
+            for (index in 0 until explicitSynonyms.length()) {
+                add(explicitSynonyms.optString(index))
+            }
+        }
+    } else {
+        item.optString("slicnoznacnice", item.optString("synonyms"))
+            .split(',', ';')
+    }
+
+    val seen = mutableSetOf<String>()
+    return values.map { it.trim() }.filter { value ->
+        val key = normalizeWord(value)
+        key.isNotBlank() && seen.add(key)
+    }
+}

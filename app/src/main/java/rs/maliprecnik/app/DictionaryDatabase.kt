@@ -9,11 +9,13 @@ import java.io.FileOutputStream
 import java.util.Locale
 
 private const val DATABASE_NAME = "prechnik.db"
-private const val DATABASE_VERSION = 7
+private const val DATABASE_VERSION = 8
 private const val SEED_DATABASE_ASSET = "prechnik_seed.db"
 
 private const val TABLE_FOREIGN_TERMS = "foreign_terms"
 private const val TABLE_REPLACEMENT_OPTIONS = "replacement_options"
+private const val TABLE_OLD_WORDS = "old_words"
+private const val TABLE_OLD_WORD_SYNONYMS = "old_word_synonyms"
 
 private const val COLUMN_ID = "id"
 private const val COLUMN_WORD = "word"
@@ -25,6 +27,10 @@ private const val COLUMN_NORMALIZED_REPLACEMENT_WORD = "normalized_replacement_w
 private const val COLUMN_EXPLANATION = "explanation"
 private const val COLUMN_WEIGHT = "weight"
 private const val COLUMN_ADDENDUM = "addendum"
+private const val COLUMN_OLD_WORD_ID = "old_word_id"
+private const val COLUMN_SYNONYM = "synonym"
+private const val COLUMN_NORMALIZED_SYNONYM = "normalized_synonym"
+private const val COLUMN_POSITION = "position"
 private const val COLUMN_UPDATED_AT = "updated_at"
 
 /**
@@ -74,8 +80,9 @@ class DictionaryDatabase(context: Context) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 7) {
             addWeightColumnIfMissing(db)
-        } else {
-            recreateCurrentTables(db)
+        }
+        if (oldVersion < 8) {
+            createOldWordTables(db)
         }
     }
 
@@ -118,12 +125,45 @@ class DictionaryDatabase(context: Context) :
             "CREATE INDEX index_replacement_options_normalized_word " +
                 "ON $TABLE_REPLACEMENT_OPTIONS($COLUMN_NORMALIZED_REPLACEMENT_WORD)"
         )
+        createOldWordTables(db)
     }
 
-    private fun recreateCurrentTables(db: SQLiteDatabase) {
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_REPLACEMENT_OPTIONS")
-        db.execSQL("DROP TABLE IF EXISTS $TABLE_FOREIGN_TERMS")
-        createCurrentTables(db)
+    private fun createOldWordTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_OLD_WORDS (
+                $COLUMN_ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                $COLUMN_WORD TEXT NOT NULL,
+                $COLUMN_NORMALIZED_WORD TEXT NOT NULL UNIQUE,
+                $COLUMN_ADDENDUM TEXT NOT NULL DEFAULT '',
+                $COLUMN_UPDATED_AT INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS $TABLE_OLD_WORD_SYNONYMS (
+                $COLUMN_ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                $COLUMN_OLD_WORD_ID INTEGER NOT NULL,
+                $COLUMN_SYNONYM TEXT NOT NULL,
+                $COLUMN_NORMALIZED_SYNONYM TEXT NOT NULL,
+                $COLUMN_POSITION INTEGER NOT NULL DEFAULT 0,
+                $COLUMN_UPDATED_AT INTEGER NOT NULL,
+                FOREIGN KEY($COLUMN_OLD_WORD_ID)
+                    REFERENCES $TABLE_OLD_WORDS($COLUMN_ID)
+                    ON DELETE CASCADE,
+                UNIQUE($COLUMN_OLD_WORD_ID, $COLUMN_NORMALIZED_SYNONYM)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_old_words_word " +
+                "ON $TABLE_OLD_WORDS($COLUMN_WORD)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_old_word_synonyms_normalized " +
+                "ON $TABLE_OLD_WORD_SYNONYMS($COLUMN_NORMALIZED_SYNONYM)"
+        )
     }
 
     private fun addWeightColumnIfMissing(db: SQLiteDatabase) {
@@ -145,9 +185,11 @@ class DictionaryDatabase(context: Context) :
         return false
     }
 
-    fun ensureInitialData(defaultEntries: List<DictionaryEntry>) {
-        if (countEntries() > 0) return
-        if (defaultEntries.isNotEmpty()) replaceAll(defaultEntries)
+    fun ensureInitialData(defaultStorage: DictionaryStorage) {
+        if (countEntries() > 0 || countOldWords() > 0) return
+        if (defaultStorage.entries.isNotEmpty() || defaultStorage.oldWords.isNotEmpty()) {
+            replaceAllStorage(defaultStorage)
+        }
     }
 
     fun countEntries(): Int {
@@ -156,8 +198,20 @@ class DictionaryDatabase(context: Context) :
         }
     }
 
+    fun countOldWords(): Int {
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM $TABLE_OLD_WORDS", null).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
     fun getAllEntries(): List<DictionaryEntry> =
         readEntriesFromDatabase(readableDatabase).deduplicatedByForeignWord()
+
+    fun getAllOldWords(): List<OldWordEntry> =
+        readOldWordsFromDatabase(readableDatabase).deduplicatedByOldWord()
+
+    fun getStorage(): DictionaryStorage =
+        DictionaryStorage(entries = getAllEntries(), oldWords = getAllOldWords())
 
     fun insertEntry(entry: DictionaryEntry): Long {
         require(findDuplicateForeignWord(entry.foreignWord) == null) {
@@ -179,10 +233,6 @@ class DictionaryDatabase(context: Context) :
         require(findDuplicateForeignWord(cleanedEntry.foreignWord, cleanedEntry.id) == null) {
             "Туђица већ постоји у бази."
         }
-        require(cleanedEntry.options.isNotEmpty()) {
-            "Потребно је унети бар једну српскословенску реч."
-        }
-
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -214,15 +264,47 @@ class DictionaryDatabase(context: Context) :
         writableDatabase.delete(TABLE_FOREIGN_TERMS, "$COLUMN_ID = ?", arrayOf(entryId.toString()))
     }
 
-    fun replaceAll(entries: List<DictionaryEntry>) {
+    fun insertOldWord(oldWord: OldWordEntry): Long {
+        require(findDuplicateOldWord(oldWord.oldWord) == null) {
+            "Стара реч већ постоји у бази."
+        }
         val db = writableDatabase
-        val uniqueEntries = entries.deduplicatedByForeignWord()
+        db.beginTransaction()
+        return try {
+            val oldWordId = insertOldWordUnchecked(db, oldWord.cleanedForStorage())
+            db.setTransactionSuccessful()
+            oldWordId
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun updateOldWord(oldWord: OldWordEntry) {
+        val cleanedOldWord = oldWord.cleanedForStorage()
+        require(findDuplicateOldWord(cleanedOldWord.oldWord, cleanedOldWord.id) == null) {
+            "Стара реч већ постоји у бази."
+        }
+
+        val db = writableDatabase
         db.beginTransaction()
         try {
-            db.delete(TABLE_REPLACEMENT_OPTIONS, null, null)
-            db.delete(TABLE_FOREIGN_TERMS, null, null)
-            uniqueEntries.forEach { entry ->
-                insertEntryUnchecked(db, entry.cleanedForStorage())
+            db.update(
+                TABLE_OLD_WORDS,
+                cleanedOldWord.toOldWordContentValues(),
+                "$COLUMN_ID = ?",
+                arrayOf(cleanedOldWord.id.toString())
+            )
+            db.delete(
+                TABLE_OLD_WORD_SYNONYMS,
+                "$COLUMN_OLD_WORD_ID = ?",
+                arrayOf(cleanedOldWord.id.toString())
+            )
+            cleanedOldWord.synonyms.forEachIndexed { index, synonym ->
+                db.insertOrThrow(
+                    TABLE_OLD_WORD_SYNONYMS,
+                    null,
+                    synonym.toOldWordSynonymContentValues(cleanedOldWord.id, index)
+                )
             }
             db.setTransactionSuccessful()
         } finally {
@@ -230,7 +312,37 @@ class DictionaryDatabase(context: Context) :
         }
     }
 
-    fun exportEntriesToDatabaseFile(targetFile: File, entries: List<DictionaryEntry>) {
+    fun deleteOldWord(oldWordId: Long) {
+        writableDatabase.delete(TABLE_OLD_WORDS, "$COLUMN_ID = ?", arrayOf(oldWordId.toString()))
+    }
+
+    fun replaceAll(entries: List<DictionaryEntry>) {
+        replaceAllStorage(DictionaryStorage(entries = entries))
+    }
+
+    fun replaceAllStorage(storage: DictionaryStorage) {
+        val db = writableDatabase
+        val uniqueEntries = storage.entries.deduplicatedByForeignWord()
+        val uniqueOldWords = storage.oldWords.deduplicatedByOldWord()
+        db.beginTransaction()
+        try {
+            db.delete(TABLE_REPLACEMENT_OPTIONS, null, null)
+            db.delete(TABLE_FOREIGN_TERMS, null, null)
+            db.delete(TABLE_OLD_WORD_SYNONYMS, null, null)
+            db.delete(TABLE_OLD_WORDS, null, null)
+            uniqueEntries.forEach { entry ->
+                insertEntryUnchecked(db, entry.cleanedForStorage())
+            }
+            uniqueOldWords.forEach { oldWord ->
+                insertOldWordUnchecked(db, oldWord.cleanedForStorage())
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun exportStorageToDatabaseFile(targetFile: File, storage: DictionaryStorage) {
         targetFile.parentFile?.mkdirs()
         if (targetFile.exists()) targetFile.delete()
 
@@ -240,8 +352,11 @@ class DictionaryDatabase(context: Context) :
             db.execSQL("PRAGMA user_version = $DATABASE_VERSION")
             db.beginTransaction()
             try {
-                entries.deduplicatedByForeignWord().forEach { entry ->
+                storage.entries.deduplicatedByForeignWord().forEach { entry ->
                     insertEntryUnchecked(db, entry.cleanedForStorage())
+                }
+                storage.oldWords.deduplicatedByOldWord().forEach { oldWord ->
+                    insertOldWordUnchecked(db, oldWord.cleanedForStorage())
                 }
                 db.setTransactionSuccessful()
             } finally {
@@ -250,25 +365,34 @@ class DictionaryDatabase(context: Context) :
         }
     }
 
-    fun entriesFromDatabaseFile(sourceFile: File): List<DictionaryEntry> {
+    fun exportEntriesToDatabaseFile(targetFile: File, entries: List<DictionaryEntry>) {
+        exportStorageToDatabaseFile(targetFile, DictionaryStorage(entries = entries))
+    }
+
+    fun storageFromDatabaseFile(sourceFile: File): DictionaryStorage {
         SQLiteDatabase.openDatabase(
             sourceFile.absolutePath,
             null,
             SQLiteDatabase.OPEN_READONLY
         ).use { db ->
-            return readEntriesFromDatabase(db).deduplicatedByForeignWord()
+            val entries = readEntriesFromDatabase(db).deduplicatedByForeignWord()
+            val oldWords = if (tableExists(db, TABLE_OLD_WORDS)) {
+                readOldWordsFromDatabase(db).deduplicatedByOldWord()
+            } else {
+                emptyList()
+            }
+            return DictionaryStorage(entries = entries, oldWords = oldWords)
         }
     }
+
+    fun entriesFromDatabaseFile(sourceFile: File): List<DictionaryEntry> =
+        storageFromDatabaseFile(sourceFile).entries
 
     private fun insertEntryUnchecked(db: SQLiteDatabase, entry: DictionaryEntry): Long {
         val cleanedEntry = entry.cleanedForStorage()
         require(cleanedEntry.foreignWord.isNotBlank()) {
             "Туђица не сме бити празна."
         }
-        require(cleanedEntry.options.isNotEmpty()) {
-            "Потребно је унети бар једну српскословенску реч."
-        }
-
         val entryId = db.insertOrThrow(
             TABLE_FOREIGN_TERMS,
             null,
@@ -284,6 +408,30 @@ class DictionaryDatabase(context: Context) :
         return entryId
     }
 
+    private fun insertOldWordUnchecked(db: SQLiteDatabase, oldWord: OldWordEntry): Long {
+        val cleanedOldWord = oldWord.cleanedForStorage()
+        require(cleanedOldWord.oldWord.isNotBlank()) {
+            "Стара реч не сме бити празна."
+        }
+        require(cleanedOldWord.synonyms.isNotEmpty()) {
+            "Потребно је унети бар једну сличнозначницу."
+        }
+
+        val oldWordId = db.insertOrThrow(
+            TABLE_OLD_WORDS,
+            null,
+            cleanedOldWord.toOldWordContentValues()
+        )
+        cleanedOldWord.synonyms.forEachIndexed { index, synonym ->
+            db.insertOrThrow(
+                TABLE_OLD_WORD_SYNONYMS,
+                null,
+                synonym.toOldWordSynonymContentValues(oldWordId, index)
+            )
+        }
+        return oldWordId
+    }
+
     private fun findDuplicateForeignWord(
         foreignWord: String,
         exceptId: Long? = null
@@ -293,6 +441,18 @@ class DictionaryDatabase(context: Context) :
 
         return getAllEntries().firstOrNull { entry ->
             entry.id != exceptId && normalizeDatabaseWord(entry.foreignWord) == normalizedWord
+        }
+    }
+
+    private fun findDuplicateOldWord(
+        oldWord: String,
+        exceptId: Long? = null
+    ): OldWordEntry? {
+        val normalizedWord = normalizeDatabaseWord(oldWord)
+        if (normalizedWord.isBlank()) return null
+
+        return getAllOldWords().firstOrNull { entry ->
+            entry.id != exceptId && normalizeDatabaseWord(entry.oldWord) == normalizedWord
         }
     }
 
@@ -355,6 +515,64 @@ class DictionaryDatabase(context: Context) :
         }
         return options
     }
+
+    private fun readOldWordsFromDatabase(db: SQLiteDatabase): List<OldWordEntry> {
+        if (!tableExists(db, TABLE_OLD_WORDS)) return emptyList()
+
+        val oldWords = mutableListOf<OldWordEntry>()
+        db.query(
+            TABLE_OLD_WORDS,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "$COLUMN_WORD ASC"
+        ).use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(COLUMN_ID)
+            val wordIndex = cursor.getColumnIndexOrThrow(COLUMN_WORD)
+            val addendumIndex = cursor.getColumnIndexOrThrow(COLUMN_ADDENDUM)
+
+            while (cursor.moveToNext()) {
+                val oldWordId = cursor.getLong(idIndex)
+                oldWords += OldWordEntry(
+                    id = oldWordId,
+                    oldWord = cursor.getString(wordIndex),
+                    addendum = cursor.getString(addendumIndex),
+                    synonyms = readSynonymsForOldWord(db, oldWordId)
+                )
+            }
+        }
+        return oldWords
+    }
+
+    private fun readSynonymsForOldWord(db: SQLiteDatabase, oldWordId: Long): List<String> {
+        val synonyms = mutableListOf<String>()
+        db.query(
+            TABLE_OLD_WORD_SYNONYMS,
+            arrayOf(COLUMN_SYNONYM),
+            "$COLUMN_OLD_WORD_ID = ?",
+            arrayOf(oldWordId.toString()),
+            null,
+            null,
+            "$COLUMN_POSITION ASC, $COLUMN_SYNONYM ASC"
+        ).use { cursor ->
+            val synonymIndex = cursor.getColumnIndexOrThrow(COLUMN_SYNONYM)
+            while (cursor.moveToNext()) {
+                synonyms += cursor.getString(synonymIndex)
+            }
+        }
+        return synonyms
+    }
+
+    private fun tableExists(db: SQLiteDatabase, tableName: String): Boolean {
+        db.rawQuery(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            arrayOf(tableName)
+        ).use { cursor ->
+            return cursor.moveToFirst()
+        }
+    }
 }
 
 private fun DictionaryEntry.toForeignTermContentValues(): ContentValues =
@@ -373,6 +591,26 @@ private fun ReplacementOption.toReplacementContentValues(): ContentValues =
         put(COLUMN_NORMALIZED_REPLACEMENT_WORD, normalizeDatabaseWord(replacementWord))
         put(COLUMN_EXPLANATION, explanation)
         put(COLUMN_WEIGHT, weight.coerceAtLeast(1))
+        put(COLUMN_UPDATED_AT, System.currentTimeMillis())
+    }
+
+private fun OldWordEntry.toOldWordContentValues(): ContentValues =
+    ContentValues().apply {
+        put(COLUMN_WORD, oldWord)
+        put(COLUMN_NORMALIZED_WORD, normalizeDatabaseWord(oldWord))
+        put(COLUMN_ADDENDUM, addendum)
+        put(COLUMN_UPDATED_AT, System.currentTimeMillis())
+    }
+
+private fun String.toOldWordSynonymContentValues(
+    oldWordId: Long,
+    position: Int
+): ContentValues =
+    ContentValues().apply {
+        put(COLUMN_OLD_WORD_ID, oldWordId)
+        put(COLUMN_SYNONYM, this@toOldWordSynonymContentValues)
+        put(COLUMN_NORMALIZED_SYNONYM, normalizeDatabaseWord(this@toOldWordSynonymContentValues))
+        put(COLUMN_POSITION, position)
         put(COLUMN_UPDATED_AT, System.currentTimeMillis())
     }
 
@@ -407,6 +645,26 @@ private fun List<DictionaryEntry>.deduplicatedByForeignWord(): List<DictionaryEn
     val seen = mutableSetOf<String>()
     return map { it.cleanedForStorage() }.filter { entry ->
         val key = normalizeDatabaseWord(entry.foreignWord)
-        key.isNotBlank() && entry.options.isNotEmpty() && seen.add(key)
+        key.isNotBlank() && seen.add(key)
+    }
+}
+
+private fun OldWordEntry.cleanedForStorage(): OldWordEntry {
+    val seen = mutableSetOf<String>()
+    return copy(
+        oldWord = oldWord.trim(),
+        addendum = addendum.trim(),
+        synonyms = synonyms.map(String::trim).filter { synonym ->
+            val key = normalizeDatabaseWord(synonym)
+            key.isNotBlank() && seen.add(key)
+        }
+    )
+}
+
+private fun List<OldWordEntry>.deduplicatedByOldWord(): List<OldWordEntry> {
+    val seen = mutableSetOf<String>()
+    return map { it.cleanedForStorage() }.filter { oldWord ->
+        val key = normalizeDatabaseWord(oldWord.oldWord)
+        key.isNotBlank() && oldWord.synonyms.isNotEmpty() && seen.add(key)
     }
 }

@@ -6,11 +6,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPalette
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -41,21 +45,26 @@ try:
     from .model import (
         BUILD_PDF_SCRIPT,
         BUILD_SEED_SCRIPT,
+        BUNDLE_ROOT,
         DEFAULT_OFFICIAL_JSON,
         APP_ICON_PATH,
         IS_FROZEN,
         PROJECT_ROOT,
         Entry,
+        OldWord,
         Option,
         clean_text,
         ensure_default_official_json,
         entry_count_text,
         find_entry_index,
+        find_old_word_index,
         foreign_word_with_initial_capital,
         initial_letter,
         normalize_entries,
+        normalize_old_words,
         normalize_word,
         read_entries,
+        read_storage,
         serbian_sort_key,
         write_entries_to_json,
     )
@@ -64,21 +73,26 @@ except ImportError:
     from model import (
         BUILD_PDF_SCRIPT,
         BUILD_SEED_SCRIPT,
+        BUNDLE_ROOT,
         DEFAULT_OFFICIAL_JSON,
         APP_ICON_PATH,
         IS_FROZEN,
         PROJECT_ROOT,
         Entry,
+        OldWord,
         Option,
         clean_text,
         ensure_default_official_json,
         entry_count_text,
         find_entry_index,
+        find_old_word_index,
         foreign_word_with_initial_capital,
         initial_letter,
         normalize_entries,
+        normalize_old_words,
         normalize_word,
         read_entries,
+        read_storage,
         serbian_sort_key,
         write_entries_to_json,
     )
@@ -142,6 +156,50 @@ def apply_dark_theme(app: QApplication) -> None:
     """)
 
 USER_ROLE_KEY = Qt.ItemDataRole.UserRole
+ITEM_KIND_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+ITEM_KIND_ENTRY = "entry"
+ITEM_KIND_OLD_WORD = "old_word"
+PDF_PAGE_SIZES = (("A5", "A5"), ("A4", "A4"))
+PDF_FONTS = (("monomakh", "Мономах"), ("eb_garamond", "ЕБ Гарамонд"))
+APP_FONT_DIR = BUNDLE_ROOT / "app" / "src" / "main" / "res" / "font"
+DISPLAY_FONT_CHOICES = (
+    ("monomakh", "Мономах", ("monomakh_regular.ttf",)),
+    ("eb_garamond", "ЕБ Гарамонд", ("eb_garamond.ttf", "eb_garamond_italic.ttf")),
+    ("noto_serif", "Ното Сериф", ("noto_serif.ttf", "noto_serif_italic.ttf")),
+    ("system", "Склоповски", ()),
+)
+DISPLAY_FONT_SIZE_CHOICES = (
+    ("smallest", "Најмања", 0.86),
+    ("small", "Мала", 0.94),
+    ("medium", "Средња", 1.0),
+    ("large", "Већа", 1.1),
+    ("largest", "Највећа", 1.2),
+)
+
+
+def settings_bool(value: object, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().casefold() not in {"0", "false", "no", "off", "не"}
+    return bool(value)
+
+
+def settings_choice(value: object, choices: tuple[tuple[str, str, object], ...], default: str) -> str:
+    allowed = {key for key, _label, _payload in choices}
+    if value is None:
+        return default
+    key = str(value)
+    return key if key in allowed else default
+
+
+def font_size_scale(key: str) -> float:
+    for option_key, _label, scale in DISPLAY_FONT_SIZE_CHOICES:
+        if option_key == key:
+            return float(scale)
+    return 1.0
 
 
 def marked_text_to_html(value: str) -> str:
@@ -158,8 +216,12 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.entries: list[Entry] = []
+        self.old_words: list[OldWord] = []
         self.current_path = ensure_default_official_json()
         self.current_edit_key: str | None = None
+        self.current_old_word_key: str | None = None
+        self.current_nav_row = 0
+        self.programmatic_nav_change = False
         self.search_direction_index = 0
         self.unsaved_entries = False
         self.remote_client = RemoteProposalClient()
@@ -167,24 +229,98 @@ class MainWindow(QMainWindow):
         self.current_voting_group: RemoteVotingGroup | None = None
         self.current_voting_option: RemoteVotingOption | None = None
         self.proposal_rules_accepted = False
+        self.settings = QSettings("MaliPrechnik", "MaliPrechnik")
+        self.show_origin = settings_bool(self.settings.value("display/show_origin", True), True)
+        self.show_explanations = settings_bool(self.settings.value("display/show_explanations", True), True)
+        self.show_addendum = settings_bool(self.settings.value("display/show_addendum", True), True)
+        self.font_choice_key = settings_choice(
+            self.settings.value("display/font_choice", "monomakh"),
+            DISPLAY_FONT_CHOICES,
+            "monomakh",
+        )
+        self.font_size_key = settings_choice(
+            self.settings.value("display/font_size", "medium"),
+            DISPLAY_FONT_SIZE_CHOICES,
+            "medium",
+        )
+        self.loaded_font_families: dict[str, str] = {}
+        app = QApplication.instance()
+        self.base_application_font = QFont(app.font()) if app is not None else QFont()
+        self.apply_application_font()
 
         self.setWindowTitle("Мали пречник" if IS_FROZEN else "Мали пречник - уредник базе")
         self.resize(1180, 760)
         self.build_ui()
         self.load_entries_from_path(self.current_path, mark_unsaved=False)
 
+    def selected_font_family(self) -> str:
+        if self.font_choice_key == "system":
+            return ""
+        if self.font_choice_key in self.loaded_font_families:
+            return self.loaded_font_families[self.font_choice_key]
+
+        font_files: tuple[str, ...] = ()
+        for key, _label, payload in DISPLAY_FONT_CHOICES:
+            if key == self.font_choice_key:
+                font_files = tuple(str(item) for item in payload)
+                break
+
+        families: list[str] = []
+        for file_name in font_files:
+            font_path = APP_FONT_DIR / file_name
+            if not font_path.exists():
+                continue
+            font_id = QFontDatabase.addApplicationFont(str(font_path))
+            if font_id != -1:
+                families.extend(QFontDatabase.applicationFontFamilies(font_id))
+
+        family = families[0] if families else ""
+        self.loaded_font_families[self.font_choice_key] = family
+        return family
+
+    def apply_application_font(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        font = QFont(self.base_application_font)
+        family = self.selected_font_family()
+        if family:
+            font.setFamily(family)
+
+        base_size = self.base_application_font.pointSizeF()
+        if base_size <= 0:
+            base_size = 9.0
+        font.setPointSizeF(base_size * font_size_scale(self.font_size_key))
+
+        app.setFont(font)
+        for widget in app.allWidgets():
+            widget.setFont(font)
+
     def build_ui(self) -> None:
         self.nav = QListWidget()
         self.nav.setFixedWidth(190)
-        for title in ("Претрага", "Туђице", "Додавање/Измена", "Гласање", "Складиште"):
+        for title in (
+            "Претрага",
+            "Туђице",
+            "Старе речи",
+            "Додавање/Измена",
+            "Додавање/Измена старе речи",
+            "Гласање",
+            "Складиште",
+            "Подешавања",
+        ):
             self.nav.addItem(QListWidgetItem(title))
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.build_search_page())
         self.stack.addWidget(self.build_words_page())
+        self.stack.addWidget(self.build_old_words_page())
         self.stack.addWidget(self.build_editor_page())
+        self.stack.addWidget(self.build_old_word_editor_page())
         self.stack.addWidget(self.build_voting_page())
         self.stack.addWidget(self.build_storage_page())
+        self.stack.addWidget(self.build_settings_page())
 
         layout = QHBoxLayout()
         layout.addWidget(self.nav)
@@ -193,8 +329,9 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setLayout(layout)
         self.setCentralWidget(root)
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.setCurrentRow(0)
+        self.nav.currentRowChanged.connect(self.handle_nav_row_changed)
+        self.navigate_to(0, confirm=False)
+        self.apply_display_settings_to_widgets()
 
         save_action = QAction("Сачувај JSON", self)
         save_action.setShortcut("Ctrl+S")
@@ -203,10 +340,158 @@ class MainWindow(QMainWindow):
 
         new_action = QAction("Нова туђица", self)
         new_action.setShortcut("Ctrl+N")
-        new_action.triggered.connect(self.new_entry)
+        new_action.triggered.connect(lambda _checked=False: self.new_entry())
         self.addAction(new_action)
 
+        new_old_word_action = QAction("Нова стара реч", self)
+        new_old_word_action.setShortcut("Ctrl+Shift+N")
+        new_old_word_action.triggered.connect(lambda _checked=False: self.new_old_word())
+        self.addAction(new_old_word_action)
+
         self.statusBar().showMessage("Спремно.")
+
+    def navigate_to(self, row: int, confirm: bool = True) -> bool:
+        """Пребацује приказ преко левог менија, уз проверу да ли се напушта измена."""
+        if confirm and not self.confirm_current_editor_exit(row):
+            return False
+
+        self.programmatic_nav_change = True
+        self.nav.setCurrentRow(row)
+        self.stack.setCurrentIndex(row)
+        self.current_nav_row = row
+        self.programmatic_nav_change = False
+        return True
+
+    def handle_nav_row_changed(self, row: int) -> None:
+        """Обрађује ручни клик у левом менију и враћа избор ако корисник остане у измени."""
+        if self.programmatic_nav_change:
+            return
+
+        if not self.confirm_current_editor_exit(row):
+            self.programmatic_nav_change = True
+            self.nav.setCurrentRow(self.current_nav_row)
+            self.programmatic_nav_change = False
+            return
+
+        self.stack.setCurrentIndex(row)
+        self.current_nav_row = row
+
+    def closeEvent(self, event) -> None:
+        """Проверава неснимљене измене и када се затвара цео прозор."""
+        if self.confirm_current_editor_exit(None):
+            event.accept()
+        else:
+            event.ignore()
+
+    def confirm_current_editor_exit(self, target_row: int | None) -> bool:
+        """Враћа True ако је безбедно напустити тренутни уреднички приказ."""
+        if target_row is not None and target_row == self.current_nav_row:
+            return True
+        if self.current_nav_row == 3 and self.entry_editor_has_changes():
+            return self.confirm_discard_changes()
+        if self.current_nav_row == 4 and self.old_word_editor_has_changes():
+            return self.confirm_discard_changes()
+        return True
+
+    def confirm_discard_changes(self) -> bool:
+        """Приказује исто упозорење као Android: измене неће бити сачуване."""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Излазак из измене")
+        dialog.setText("Уколико изађете, промене неће бити сачуване.")
+        exit_button = dialog.addButton("Изађи", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("Остани", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        return dialog.clickedButton() is exit_button
+
+    def confirm_remove_option(self) -> bool:
+        """Тражи потврду пре уклањања једног српскословенског предлога."""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Уклањање предлога")
+        dialog.setText("Да ли желите да уклоните овај предлог?")
+        yes_button = dialog.addButton("Да", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("Не", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        return dialog.clickedButton() is yes_button
+
+    def entry_editor_snapshot(self) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
+        """Чита тренутно стање уредника туђице у облику погодном за поређење."""
+        if not hasattr(self, "foreign_input"):
+            return ("", "", "", ())
+        options = tuple(
+            (clean_text(word), clean_text(explanation))
+            for word, explanation in self.option_row_values()
+            if clean_text(word) or clean_text(explanation)
+        )
+        return (
+            clean_text(self.foreign_input.text()),
+            clean_text(self.origin_input.text()),
+            clean_text(self.addendum_input.toPlainText()),
+            options,
+        )
+
+    def entry_snapshot(self, entry: Entry | None) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
+        """Претвара сачувану туђицу у исти облик као уредник, да би се откриле измене."""
+        if entry is None:
+            return ("", "", "", ())
+        return (
+            clean_text(entry.foreign_word),
+            clean_text(entry.origin),
+            clean_text(entry.addendum),
+            tuple(
+                (clean_text(option.replacement_word), clean_text(option.explanation))
+                for option in entry.normalized_options()
+            ),
+        )
+
+    def entry_editor_has_changes(self) -> bool:
+        """Проверава да ли уредник туђице садржи неснимљене измене."""
+        current = self.entry_editor_snapshot()
+        if self.current_edit_key is None:
+            return any(current[:3]) or bool(current[3])
+
+        index = find_entry_index(self.entries, self.current_edit_key)
+        original = self.entries[index] if index is not None else None
+        return current != self.entry_snapshot(original)
+
+    def old_word_editor_snapshot(self) -> tuple[str, str, tuple[str, ...]]:
+        """Чита тренутно стање уредника старе речи у облику погодном за поређење."""
+        if not hasattr(self, "old_word_input"):
+            return ("", "", ())
+
+        synonyms: list[str] = []
+        seen: set[str] = set()
+        for raw_synonym in re.split(r"[,;\n]+", self.old_word_synonyms_input.toPlainText()):
+            synonym = clean_text(raw_synonym)
+            synonym_key = normalize_word(synonym)
+            if synonym_key and synonym_key not in seen:
+                seen.add(synonym_key)
+                synonyms.append(synonym)
+
+        return (
+            clean_text(self.old_word_input.text()),
+            clean_text(self.old_word_addendum_input.toPlainText()),
+            tuple(synonyms),
+        )
+
+    def old_word_snapshot(self, old_word: OldWord | None) -> tuple[str, str, tuple[str, ...]]:
+        """Претвара сачувану стару реч у исти облик као уредник."""
+        if old_word is None:
+            return ("", "", ())
+        return (
+            clean_text(old_word.old_word),
+            clean_text(old_word.addendum),
+            tuple(clean_text(synonym) for synonym in old_word.normalized_synonyms() if clean_text(synonym)),
+        )
+
+    def old_word_editor_has_changes(self) -> bool:
+        """Проверава да ли уредник старе речи садржи неснимљене измене."""
+        current = self.old_word_editor_snapshot()
+        if self.current_old_word_key is None:
+            return bool(current[0] or current[1] or current[2])
+
+        index = find_old_word_index(self.old_words, self.current_old_word_key)
+        original = self.old_words[index] if index is not None else None
+        return current != self.old_word_snapshot(original)
 
     def build_search_page(self) -> QWidget:
         page = QWidget()
@@ -214,16 +499,23 @@ class MainWindow(QMainWindow):
 
         controls = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Унеси туђицу или српскословенску реч")
+        self.search_input.setPlaceholderText("Унеси туђицу, српскословенску реч, стару реч или њену сличнозначницу")
         self.foreign_to_replacement_button = QPushButton("туђица -> српслв")
         self.replacement_to_foreign_button = QPushButton("српслв -> туђица")
-        for direction_button in (self.foreign_to_replacement_button, self.replacement_to_foreign_button):
+        self.old_word_search_button = QPushButton("стара реч")
+        for direction_button in (
+            self.foreign_to_replacement_button,
+            self.replacement_to_foreign_button,
+            self.old_word_search_button,
+        ):
             direction_button.setCheckable(True)
         self.foreign_to_replacement_button.clicked.connect(lambda _checked=False: self.set_search_direction(0))
         self.replacement_to_foreign_button.clicked.connect(lambda _checked=False: self.set_search_direction(1))
+        self.old_word_search_button.clicked.connect(lambda _checked=False: self.set_search_direction(2))
         controls.addWidget(self.search_input, 1)
         controls.addWidget(self.foreign_to_replacement_button)
         controls.addWidget(self.replacement_to_foreign_button)
+        controls.addWidget(self.old_word_search_button)
         layout.addLayout(controls)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -263,6 +555,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "foreign_to_replacement_button"):
             self.foreign_to_replacement_button.setChecked(index == 0)
             self.replacement_to_foreign_button.setChecked(index == 1)
+            self.old_word_search_button.setChecked(index == 2)
+            if index == 0:
+                self.search_input.setPlaceholderText("Унеси туђицу")
+            elif index == 1:
+                self.search_input.setPlaceholderText("Унеси српскословенску реч")
+            else:
+                self.search_input.setPlaceholderText("Унеси стару реч или њену сличнозначницу")
+            self.update_search_headers()
         if refresh:
             self.refresh_search()
 
@@ -280,6 +580,22 @@ class MainWindow(QMainWindow):
 
         self.words_tree.itemExpanded.connect(self.collapse_other_letters)
         self.words_tree.itemDoubleClicked.connect(self.open_word_item)
+        return page
+
+    def build_old_words_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        label = QLabel("Старе речи су груписане по почетном слову. Двоклик на стару реч отвара измену.")
+        layout.addWidget(label)
+
+        self.old_words_tree = QTreeWidget()
+        self.old_words_tree.setHeaderLabels(("Стара реч", "Сличнозначнице", "Додатак"))
+        self.old_words_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.old_words_tree, 1)
+
+        self.old_words_tree.itemExpanded.connect(self.collapse_other_old_word_letters)
+        self.old_words_tree.itemDoubleClicked.connect(self.open_old_word_item)
         return page
 
     def build_editor_page(self) -> QWidget:
@@ -331,7 +647,7 @@ class MainWindow(QMainWindow):
         save_button = QPushButton("Сачувај реч у JSON")
         delete_button = QPushButton("Уклони туђицу")
         self.suggest_editor_button = QPushButton("Предложи као нову реч")
-        new_button.clicked.connect(self.new_entry)
+        new_button.clicked.connect(lambda _checked=False: self.new_entry())
         save_button.clicked.connect(self.save_editor_entry)
         delete_button.clicked.connect(self.delete_current_editor_entry)
         self.suggest_editor_button.clicked.connect(self.suggest_editor_entry)
@@ -408,7 +724,7 @@ class MainWindow(QMainWindow):
             commands.extend(
                 (
                     ("Направи Android seed DB/JSON", self.build_android_seed),
-                    ("Направи A5 PDF мини речник", self.build_a5_pdf),
+                    ("Израда ПДФ списа", self.build_a5_pdf),
                 )
             )
         for text, handler in commands:
@@ -419,32 +735,142 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         return page
 
+    def build_old_word_editor_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        form = QFormLayout()
+        self.old_word_input = QLineEdit()
+        self.old_word_addendum_input = QTextEdit()
+        self.old_word_addendum_input.setFixedHeight(72)
+        self.old_word_synonyms_input = QTextEdit()
+        self.old_word_synonyms_input.setPlaceholderText("Унеси сличнозначнице, раздвојене зарезом, тачком-зарезом или новим редом")
+        form.addRow("Стара реч", self.old_word_input)
+        form.addRow("Додатак", self.old_word_addendum_input)
+        form.addRow("Сличнозначнице", self.old_word_synonyms_input)
+        layout.addLayout(form, 1)
+
+        buttons = QHBoxLayout()
+        new_button = QPushButton("Нова стара реч")
+        save_button = QPushButton("Сачувај стару реч у JSON")
+        delete_button = QPushButton("Уклони стару реч")
+        new_button.clicked.connect(lambda _checked=False: self.new_old_word())
+        save_button.clicked.connect(self.save_old_word)
+        delete_button.clicked.connect(self.delete_current_old_word)
+        buttons.addWidget(new_button)
+        buttons.addWidget(save_button)
+        buttons.addWidget(delete_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        return page
+
+    def build_settings_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        label = QLabel("Одабери шта ће се приказивати у резултатима претраге и у приказу туђице.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        self.show_origin_checkbox = QCheckBox("Порекло туђице")
+        self.show_explanations_checkbox = QCheckBox("Појашњења за сваку туђицу")
+        self.show_addendum_checkbox = QCheckBox("Додатак за сваку туђицу")
+        self.show_origin_checkbox.setChecked(self.show_origin)
+        self.show_explanations_checkbox.setChecked(self.show_explanations)
+        self.show_addendum_checkbox.setChecked(self.show_addendum)
+
+        self.font_choice_combo = QComboBox()
+        for key, label_text, _payload in DISPLAY_FONT_CHOICES:
+            self.font_choice_combo.addItem(label_text, key)
+        self.font_choice_combo.setCurrentIndex(max(0, self.font_choice_combo.findData(self.font_choice_key)))
+
+        self.font_size_combo = QComboBox()
+        for key, label_text, _scale in DISPLAY_FONT_SIZE_CHOICES:
+            self.font_size_combo.addItem(label_text, key)
+        self.font_size_combo.setCurrentIndex(max(0, self.font_size_combo.findData(self.font_size_key)))
+
+        layout.addWidget(self.show_origin_checkbox)
+        layout.addWidget(self.show_explanations_checkbox)
+        layout.addWidget(self.show_addendum_checkbox)
+
+        form = QFormLayout()
+        form.addRow("Писмо", self.font_choice_combo)
+        form.addRow("Величина слова", self.font_size_combo)
+        layout.addLayout(form)
+
+        apply_button = QPushButton("Постави")
+        apply_button.clicked.connect(self.apply_display_settings)
+        layout.addWidget(apply_button)
+        layout.addStretch(1)
+        return page
+
+    def apply_display_settings(self) -> None:
+        self.show_origin = self.show_origin_checkbox.isChecked()
+        self.show_explanations = self.show_explanations_checkbox.isChecked()
+        self.show_addendum = self.show_addendum_checkbox.isChecked()
+        self.font_choice_key = str(self.font_choice_combo.currentData() or "monomakh")
+        self.font_size_key = str(self.font_size_combo.currentData() or "medium")
+        self.settings.setValue("display/show_origin", self.show_origin)
+        self.settings.setValue("display/show_explanations", self.show_explanations)
+        self.settings.setValue("display/show_addendum", self.show_addendum)
+        self.settings.setValue("display/font_choice", self.font_choice_key)
+        self.settings.setValue("display/font_size", self.font_size_key)
+        self.settings.sync()
+        self.apply_application_font()
+        self.apply_display_settings_to_widgets()
+        self.refresh_search()
+        self.update_search_detail()
+        self.update_voting_option_selection()
+        self.statusBar().showMessage("Подешавања су примењена.")
+
+    def apply_display_settings_to_widgets(self) -> None:
+        self.update_search_headers()
+        if hasattr(self, "words_tree"):
+            self.words_tree.setColumnHidden(1, not self.show_origin)
+
+    def update_search_headers(self) -> None:
+        if hasattr(self, "search_results"):
+            if self.search_direction_index == 2:
+                self.search_results.setHeaderLabels(("Стара реч", "", "Сличнозначнице", "Додатак"))
+                self.search_results.setColumnHidden(1, True)
+                self.search_results.setColumnHidden(3, False)
+            else:
+                self.search_results.setHeaderLabels(
+                    ("Туђица", "Порекло туђице", "Српскословенска реч", "Појашњење")
+                )
+                self.search_results.setColumnHidden(1, not self.show_origin)
+                self.search_results.setColumnHidden(3, not self.show_explanations)
+
     def load_entries_from_path(self, path: Path, mark_unsaved: bool) -> None:
         try:
-            entries = read_entries(path)
+            entries, old_words = read_storage(path)
         except Exception as exc:
             QMessageBox.critical(self, "Учитавање није успело", str(exc))
             return
 
         self.entries = normalize_entries(entries)
+        self.old_words = normalize_old_words(old_words)
         if path.suffix.casefold() == ".json":
             self.current_path = path
         self.current_edit_key = None
+        self.current_old_word_key = None
         self.unsaved_entries = mark_unsaved
         self.refresh_all()
-        self.new_entry()
+        self.new_entry(confirm=False)
         self.statusBar().showMessage(f"Учитано: {path}")
 
     def refresh_all(self) -> None:
         self.entries = normalize_entries(self.entries)
+        self.old_words = normalize_old_words(self.old_words)
         self.refresh_search()
         self.refresh_words_tree()
+        self.refresh_old_words_tree()
         self.refresh_storage_info()
 
     def refresh_storage_info(self) -> None:
         suffix = " (има несачуваних измена)" if self.unsaved_entries else ""
         self.path_label.setText(f"Тренутни JSON: {self.current_path}{suffix}")
-        self.stats_label.setText(entry_count_text(self.entries))
+        self.stats_label.setText(entry_count_text(self.entries, self.old_words))
 
     def refresh_search(self) -> None:
         query = normalize_word(self.search_input.text()) if hasattr(self, "search_input") else ""
@@ -455,9 +881,16 @@ class MainWindow(QMainWindow):
         if not query:
             return
 
-        replacement_direction = self.search_direction_index == 1
+        if self.search_direction_index == 2:
+            for old_word in self.old_words:
+                if query in normalize_word(old_word.old_word) or any(
+                    query in normalize_word(synonym) for synonym in old_word.normalized_synonyms()
+                ):
+                    self.add_old_word_search_item(old_word)
+            return
+
         for entry in self.entries:
-            if replacement_direction:
+            if self.search_direction_index == 1:
                 for option in entry.normalized_options():
                     if query in normalize_word(option.replacement_word):
                         self.add_search_item(entry, option)
@@ -466,9 +899,18 @@ class MainWindow(QMainWindow):
 
     def add_search_item(self, entry: Entry, option: Option | None) -> None:
         option_words = option.replacement_word if option else ", ".join(item.replacement_word for item in entry.normalized_options())
-        explanation = option.explanation if option else ""
-        item = QTreeWidgetItem((entry.foreign_word, entry.origin, option_words, explanation))
+        origin = entry.origin if self.show_origin else ""
+        explanation = option.explanation if option and self.show_explanations else ""
+        item = QTreeWidgetItem((entry.foreign_word, origin, option_words, explanation))
         item.setData(0, USER_ROLE_KEY, normalize_word(entry.foreign_word))
+        item.setData(0, ITEM_KIND_ROLE, ITEM_KIND_ENTRY)
+        self.search_results.addTopLevelItem(item)
+
+    def add_old_word_search_item(self, old_word: OldWord) -> None:
+        synonyms = ", ".join(old_word.normalized_synonyms())
+        item = QTreeWidgetItem((old_word.old_word, "", synonyms, old_word.addendum))
+        item.setData(0, USER_ROLE_KEY, normalize_word(old_word.old_word))
+        item.setData(0, ITEM_KIND_ROLE, ITEM_KIND_OLD_WORD)
         self.search_results.addTopLevelItem(item)
 
     def update_search_detail(self) -> None:
@@ -476,7 +918,12 @@ class MainWindow(QMainWindow):
         if not selected:
             self.search_detail.clear()
             return
-        entry = self.entry_from_item(selected[0])
+        item = selected[0]
+        old_word = self.old_word_from_item(item)
+        if old_word is not None:
+            self.search_detail.setHtml(self.old_word_to_html(old_word))
+            return
+        entry = self.entry_from_item(item)
         self.search_detail.setHtml(self.entry_to_html(entry) if entry else "")
 
     def refresh_words_tree(self) -> None:
@@ -493,6 +940,30 @@ class MainWindow(QMainWindow):
             for entry in sorted(groups[letter], key=lambda item: serbian_sort_key(item.foreign_word)):
                 child = QTreeWidgetItem((entry.foreign_word, entry.origin, str(len(entry.normalized_options()))))
                 child.setData(0, USER_ROLE_KEY, normalize_word(entry.foreign_word))
+                child.setData(0, ITEM_KIND_ROLE, ITEM_KIND_ENTRY)
+                parent.addChild(child)
+
+    def refresh_old_words_tree(self) -> None:
+        if not hasattr(self, "old_words_tree"):
+            return
+        self.old_words_tree.clear()
+        groups: dict[str, list[OldWord]] = {}
+        for old_word in self.old_words:
+            groups.setdefault(initial_letter(old_word.old_word), []).append(old_word)
+
+        for letter in sorted(groups, key=serbian_sort_key):
+            parent = QTreeWidgetItem((letter, str(len(groups[letter])), ""))
+            self.old_words_tree.addTopLevelItem(parent)
+            for old_word in sorted(groups[letter], key=lambda item: serbian_sort_key(item.old_word)):
+                child = QTreeWidgetItem(
+                    (
+                        old_word.old_word,
+                        ", ".join(old_word.normalized_synonyms()),
+                        old_word.addendum,
+                    )
+                )
+                child.setData(0, USER_ROLE_KEY, normalize_word(old_word.old_word))
+                child.setData(0, ITEM_KIND_ROLE, ITEM_KIND_OLD_WORD)
                 parent.addChild(child)
 
     def collapse_other_letters(self, expanded_item: QTreeWidgetItem) -> None:
@@ -503,18 +974,45 @@ class MainWindow(QMainWindow):
             if item is not expanded_item:
                 item.setExpanded(False)
 
+    def collapse_other_old_word_letters(self, expanded_item: QTreeWidgetItem) -> None:
+        if expanded_item.parent() is not None:
+            return
+        for index in range(self.old_words_tree.topLevelItemCount()):
+            item = self.old_words_tree.topLevelItem(index)
+            if item is not expanded_item:
+                item.setExpanded(False)
+
     def open_word_item(self, item: QTreeWidgetItem, _column: int) -> None:
         if item.parent() is None:
             item.setExpanded(not item.isExpanded())
             return
         self.edit_item(item)
 
+    def open_old_word_item(self, item: QTreeWidgetItem, _column: int) -> None:
+        if item.parent() is None:
+            item.setExpanded(not item.isExpanded())
+            return
+        old_word = self.old_word_from_item(item)
+        if old_word is not None:
+            self.load_old_word_into_editor(old_word)
+
     def entry_from_item(self, item: QTreeWidgetItem) -> Entry | None:
+        if item.data(0, ITEM_KIND_ROLE) == ITEM_KIND_OLD_WORD:
+            return None
         key = item.data(0, USER_ROLE_KEY)
         if not key:
             return None
         index = find_entry_index(self.entries, str(key))
         return self.entries[index] if index is not None else None
+
+    def old_word_from_item(self, item: QTreeWidgetItem) -> OldWord | None:
+        if item.data(0, ITEM_KIND_ROLE) != ITEM_KIND_OLD_WORD:
+            return None
+        key = item.data(0, USER_ROLE_KEY)
+        if not key:
+            return None
+        index = find_old_word_index(self.old_words, str(key))
+        return self.old_words[index] if index is not None else None
 
     def edit_selected_item(self, tree: QTreeWidget) -> None:
         selected = tree.selectedItems()
@@ -522,6 +1020,10 @@ class MainWindow(QMainWindow):
             self.edit_item(selected[0])
 
     def edit_item(self, item: QTreeWidgetItem) -> None:
+        old_word = self.old_word_from_item(item)
+        if old_word is not None:
+            self.load_old_word_into_editor(old_word)
+            return
         entry = self.entry_from_item(item)
         if entry:
             self.load_entry_into_editor(entry)
@@ -529,6 +1031,10 @@ class MainWindow(QMainWindow):
     def delete_selected_item(self, tree: QTreeWidget) -> None:
         selected = tree.selectedItems()
         if selected:
+            old_word = self.old_word_from_item(selected[0])
+            if old_word is not None:
+                self.delete_old_word(old_word)
+                return
             entry = self.entry_from_item(selected[0])
             if entry:
                 self.delete_entry(entry)
@@ -537,11 +1043,20 @@ class MainWindow(QMainWindow):
         selected = tree.selectedItems()
         if not selected:
             return
+        if self.old_word_from_item(selected[0]) is not None:
+            QMessageBox.information(
+                self,
+                "Предлог није доступан",
+                "Онлајн предлагање је тренутно намењено туђицама. Стару реч можете уредити у личном JSON складишту.",
+            )
+            return
         entry = self.entry_from_item(selected[0])
         if entry:
             self.suggest_entry_change(entry)
 
-    def new_entry(self) -> None:
+    def new_entry(self, confirm: bool = True) -> None:
+        if confirm and not self.confirm_current_editor_exit(None):
+            return
         self.current_edit_key = None
         if hasattr(self, "foreign_input"):
             self.foreign_input.clear()
@@ -550,9 +1065,11 @@ class MainWindow(QMainWindow):
             self.options_table.setRowCount(0)
             self.add_option_row()
             self.suggest_editor_button.setText("Предложи као нову реч")
-        self.nav.setCurrentRow(2)
+        self.navigate_to(3, confirm=False)
 
-    def load_entry_into_editor(self, entry: Entry) -> None:
+    def load_entry_into_editor(self, entry: Entry, confirm: bool = True) -> None:
+        if confirm and not self.confirm_current_editor_exit(None):
+            return
         self.current_edit_key = normalize_word(entry.foreign_word)
         self.foreign_input.setText(entry.foreign_word)
         self.origin_input.setText(entry.origin)
@@ -563,7 +1080,26 @@ class MainWindow(QMainWindow):
         if self.options_table.rowCount() == 0:
             self.add_option_row()
         self.suggest_editor_button.setText("Предложи као измену")
-        self.nav.setCurrentRow(2)
+        self.navigate_to(3, confirm=False)
+
+    def new_old_word(self, confirm: bool = True) -> None:
+        if confirm and not self.confirm_current_editor_exit(None):
+            return
+        self.current_old_word_key = None
+        if hasattr(self, "old_word_input"):
+            self.old_word_input.clear()
+            self.old_word_addendum_input.clear()
+            self.old_word_synonyms_input.clear()
+        self.navigate_to(4, confirm=False)
+
+    def load_old_word_into_editor(self, old_word: OldWord, confirm: bool = True) -> None:
+        if confirm and not self.confirm_current_editor_exit(None):
+            return
+        self.current_old_word_key = normalize_word(old_word.old_word)
+        self.old_word_input.setText(old_word.old_word)
+        self.old_word_addendum_input.setPlainText(old_word.addendum)
+        self.old_word_synonyms_input.setPlainText("\n".join(old_word.normalized_synonyms()))
+        self.navigate_to(4, confirm=False)
 
     def add_option_row(self, replacement_word: str = "", explanation: str = "", weight: int | str | None = None) -> None:
         row = self.options_table.rowCount()
@@ -650,6 +1186,8 @@ class MainWindow(QMainWindow):
         if row < 0:
             row = self.options_table.currentRow()
         if row >= 0:
+            if not self.confirm_remove_option():
+                return
             self.options_table.removeRow(row)
         if self.options_table.rowCount() == 0:
             self.add_option_row()
@@ -676,14 +1214,35 @@ class MainWindow(QMainWindow):
                     )
                 )
 
-        if not options:
-            raise ValueError("Потребан је бар један српскословенски предлог.")
-
         return Entry(
             foreign_word=foreign_word,
             origin=clean_text(self.origin_input.text()),
             addendum=clean_text(self.addendum_input.toPlainText()),
             options=options,
+        )
+
+    def collect_old_word(self) -> OldWord:
+        old_word = clean_text(self.old_word_input.text())
+        if not old_word:
+            raise ValueError("Поље Стара реч мора бити попуњено.")
+
+        raw_synonyms = re.split(r"[,;\n]+", self.old_word_synonyms_input.toPlainText())
+        synonyms: list[str] = []
+        seen: set[str] = set()
+        for synonym in raw_synonyms:
+            cleaned_synonym = clean_text(synonym)
+            key = normalize_word(cleaned_synonym)
+            if key and key not in seen:
+                seen.add(key)
+                synonyms.append(cleaned_synonym)
+
+        if not synonyms:
+            raise ValueError("Потребно је унети бар једну сличнозначницу.")
+
+        return OldWord(
+            old_word=old_word,
+            addendum=clean_text(self.old_word_addendum_input.toPlainText()),
+            synonyms=synonyms,
         )
 
     def save_editor_entry(self) -> None:
@@ -707,18 +1266,55 @@ class MainWindow(QMainWindow):
             self.current_edit_key = new_key
             self.save_current_json()
             self.refresh_all()
-            self.load_entry_into_editor(self.entries[find_entry_index(self.entries, entry.foreign_word) or 0])
+            self.load_entry_into_editor(self.entries[find_entry_index(self.entries, entry.foreign_word) or 0], confirm=False)
             self.statusBar().showMessage(f"Сачувано: {entry.foreign_word}")
         except Exception as exc:
             QMessageBox.warning(self, "Реч није сачувана", str(exc))
 
+    def save_old_word(self) -> None:
+        try:
+            old_word = self.collect_old_word()
+            new_key = normalize_word(old_word.old_word)
+            existing_index = find_old_word_index(self.old_words, old_word.old_word)
+            if existing_index is not None and new_key != self.current_old_word_key:
+                raise ValueError(f"Стара реч већ постоји: {old_word.old_word}")
+
+            if self.current_old_word_key is None:
+                self.old_words.append(old_word)
+            else:
+                old_index = find_old_word_index(self.old_words, self.current_old_word_key)
+                if old_index is None:
+                    self.old_words.append(old_word)
+                else:
+                    self.old_words[old_index] = old_word
+
+            self.old_words = normalize_old_words(self.old_words)
+            self.current_old_word_key = new_key
+            self.save_current_json()
+            self.refresh_all()
+            self.load_old_word_into_editor(
+                self.old_words[find_old_word_index(self.old_words, old_word.old_word) or 0],
+                confirm=False,
+            )
+            self.statusBar().showMessage(f"Сачувано: {old_word.old_word}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Стара реч није сачувана", str(exc))
+
     def delete_current_editor_entry(self) -> None:
         if self.current_edit_key is None:
-            self.new_entry()
+            self.new_entry(confirm=False)
             return
         index = find_entry_index(self.entries, self.current_edit_key)
         if index is not None:
             self.delete_entry(self.entries[index])
+
+    def delete_current_old_word(self) -> None:
+        if self.current_old_word_key is None:
+            self.new_old_word(confirm=False)
+            return
+        index = find_old_word_index(self.old_words, self.current_old_word_key)
+        if index is not None:
+            self.delete_old_word(self.old_words[index])
 
     def delete_entry(self, entry: Entry) -> None:
         answer = QMessageBox.question(
@@ -733,8 +1329,28 @@ class MainWindow(QMainWindow):
         self.current_edit_key = None
         self.save_current_json()
         self.refresh_all()
-        self.new_entry()
+        self.new_entry(confirm=False)
         self.statusBar().showMessage(f"Уклоњено: {entry.foreign_word}")
+
+    def delete_old_word(self, old_word: OldWord) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Уклањање старе речи",
+            f"Да ли сте сигурни да желите да уклоните стару реч „{old_word.old_word}” и све њене сличнозначнице?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.old_words = [
+            item
+            for item in self.old_words
+            if normalize_word(item.old_word) != normalize_word(old_word.old_word)
+        ]
+        self.current_old_word_key = None
+        self.save_current_json()
+        self.refresh_all()
+        self.new_old_word(confirm=False)
+        self.statusBar().showMessage(f"Уклоњено: {old_word.old_word}")
 
     def ensure_proposal_rules_accepted(self) -> bool:
         if self.proposal_rules_accepted:
@@ -942,8 +1558,8 @@ class MainWindow(QMainWindow):
 
     def save_current_json(self) -> None:
         try:
-            write_entries_to_json(self.entries, self.current_path)
-            self.entries = read_entries(self.current_path)
+            write_entries_to_json(self.entries, self.current_path, self.old_words)
+            self.entries, self.old_words = read_storage(self.current_path)
             self.unsaved_entries = False
             self.refresh_all()
             self.statusBar().showMessage(f"JSON сачуван: {self.current_path}")
@@ -981,11 +1597,88 @@ class MainWindow(QMainWindow):
             "Android seed база је направљена и копирана у assets.",
         )
 
+    def pdf_build_options(self) -> list[str] | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Израда ПДФ списа")
+
+        layout = QVBoxLayout(dialog)
+        intro = QLabel("Одабери шта ће ући у ПДФ спис.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        include_foreign_words = QCheckBox("Са туђицама")
+        include_old_words = QCheckBox("Са старим речима")
+        include_explanations = QCheckBox("Са појашњењима")
+        include_origin = QCheckBox("Са пореклом туђице")
+        include_addendum = QCheckBox("Са додатцима")
+        include_foreign_words.setChecked(True)
+        include_old_words.setChecked(False)
+        include_explanations.setChecked(True)
+        include_origin.setChecked(True)
+        include_addendum.setChecked(True)
+
+        for checkbox in (
+            include_foreign_words,
+            include_old_words,
+            include_explanations,
+            include_origin,
+            include_addendum,
+        ):
+            layout.addWidget(checkbox)
+
+        form = QFormLayout()
+        page_size_combo = QComboBox()
+        for value, label in PDF_PAGE_SIZES:
+            page_size_combo.addItem(label, value)
+        font_combo = QComboBox()
+        for value, label in PDF_FONTS:
+            font_combo.addItem(label, value)
+        form.addRow("Образац листа", page_size_combo)
+        form.addRow("Писмо", font_combo)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox()
+        make_button = buttons.addButton("Сачини", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("Одустани", QDialogButtonBox.ButtonRole.RejectRole)
+        layout.addWidget(buttons)
+
+        def accept_if_valid() -> None:
+            if not include_foreign_words.isChecked() and not include_old_words.isChecked():
+                QMessageBox.warning(
+                    dialog,
+                    "Непотпун избор",
+                    "ПДФ спис мора да садржи барем туђице или старе речи.",
+                )
+                return
+            dialog.accept()
+
+        make_button.clicked.connect(accept_if_valid)
+        cancel_button.clicked.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        options = [
+            "--page-size",
+            str(page_size_combo.currentData()),
+            "--font-choice",
+            str(font_combo.currentData()),
+        ]
+        options.append("--include-foreign-words" if include_foreign_words.isChecked() else "--no-include-foreign-words")
+        options.append("--include-old-words" if include_old_words.isChecked() else "--no-include-old-words")
+        options.append("--include-explanations" if include_explanations.isChecked() else "--no-include-explanations")
+        options.append("--include-origin" if include_origin.isChecked() else "--no-include-origin")
+        options.append("--include-addendum" if include_addendum.isChecked() else "--no-include-addendum")
+        return options
+
     def build_a5_pdf(self) -> None:
+        options = self.pdf_build_options()
+        if options is None:
+            return
         self.save_current_json()
         self.run_script(
-            [sys.executable, str(BUILD_PDF_SCRIPT), "--input", str(self.current_path)],
-            "A5 PDF мини речник је направљен.",
+            [sys.executable, str(BUILD_PDF_SCRIPT), "--input", str(self.current_path), *options],
+            "ПДФ спис је направљен.",
         )
 
     def run_script(self, command: list[str], success_message: str) -> None:
@@ -1009,19 +1702,56 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Скрипта није успела", output or f"Излазни код: {completed.returncode}")
 
     def entry_to_html(self, entry: Entry) -> str:
-        options_html = []
-        for option in sorted(entry.normalized_options(), key=lambda item: (item.weight, serbian_sort_key(item.replacement_word))):
-            explanation = f" - <i>{marked_text_to_html(option.explanation)}</i>" if option.explanation else ""
-            options_html.append(f"<li><b>{marked_text_to_html(option.replacement_word)}</b>{explanation}</li>")
+        options = sorted(
+            entry.normalized_options(),
+            key=lambda item: (item.weight, serbian_sort_key(item.replacement_word)),
+        )
+        should_show_addendum = self.show_addendum or (not options and bool(entry.addendum))
 
-        origin = f"<p><b>Порекло туђице:</b> <i>{marked_text_to_html(entry.origin)}</i></p>" if entry.origin else ""
-        addendum = f"<p><b>Додатак:</b><br>{marked_text_to_html(entry.addendum)}</p>" if entry.addendum else ""
+        if self.show_explanations:
+            options_html = []
+            for option in options:
+                explanation = f" - <i>{marked_text_to_html(option.explanation)}</i>" if option.explanation else ""
+                options_html.append(f"<li><b>{marked_text_to_html(option.replacement_word)}</b>{explanation}</li>")
+            options_block = f"<ul>{''.join(options_html)}</ul>" if options_html else ""
+        else:
+            words = ", ".join(marked_text_to_html(option.replacement_word) for option in options)
+            options_block = f"<p>{words}</p>" if words else ""
+
+        origin = (
+            f"<p><b>Порекло туђице:</b> <i>{marked_text_to_html(entry.origin)}</i></p>"
+            if self.show_origin and entry.origin
+            else ""
+        )
+        addendum = (
+            f"<p><b>Додатак:</b><br><i>{marked_text_to_html(entry.addendum)}</i></p>"
+            if should_show_addendum and entry.addendum
+            else ""
+        )
+        options_section = (
+            f"<p><b>Српскословенске речи:</b></p>{options_block}"
+            if options_block
+            else ""
+        )
         return f"""
         <h2>{marked_text_to_html(entry.foreign_word)}</h2>
         {origin}
-        <p><b>Српскословенске речи:</b></p>
-        <ul>{''.join(options_html)}</ul>
+        {options_section}
         {addendum}
+        """
+
+    def old_word_to_html(self, old_word: OldWord) -> str:
+        addendum = (
+            f"<p><b>Додатак:</b><br><i>{marked_text_to_html(old_word.addendum)}</i></p>"
+            if old_word.addendum
+            else ""
+        )
+        synonyms = ", ".join(marked_text_to_html(synonym) for synonym in old_word.normalized_synonyms())
+        synonyms_block = f"<p><b>Сличнозначнице:</b><br>{synonyms}</p>" if synonyms else ""
+        return f"""
+        <h2>{marked_text_to_html(old_word.old_word)}</h2>
+        {addendum}
+        {synonyms_block}
         """
 
 

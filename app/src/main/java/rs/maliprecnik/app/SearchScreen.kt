@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -27,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
@@ -41,21 +43,30 @@ import androidx.compose.ui.unit.dp
 fun SearchScreen(
     modifier: Modifier = Modifier,
     entries: List<DictionaryEntry>,
+    oldWords: List<OldWordEntry>,
     query: String,
     onQueryChange: (String) -> Unit,
     searchDirection: SearchDirection,
     onSearchDirectionChange: (SearchDirection) -> Unit,
+    displaySettings: DisplaySettings,
     statusMessage: String,
     proposalRulesAccepted: Boolean,
     onAcceptProposalRules: () -> Unit,
     onEditEntry: (DictionaryEntry) -> Unit,
+    onEditOldWord: (OldWordEntry) -> Unit,
     onSuggestEntryChange: (DictionaryEntry, String) -> Unit
 ) {
-    val result = remember(query, entries, searchDirection) {
-        searchDictionary(query, entries, searchDirection)
+    val result = remember(query, entries, oldWords, searchDirection) {
+        searchDictionary(query, entries, oldWords, searchDirection)
     }
-    val suggestions = remember(query, entries, searchDirection) {
-        searchSuggestions(query, entries, searchDirection)
+    val suggestions = remember(query, entries, oldWords, searchDirection) {
+        searchSuggestions(query, entries, oldWords, searchDirection)
+    }
+    val focusManager = LocalFocusManager.current
+
+    fun chooseSuggestion(value: String) {
+        onQueryChange(value)
+        focusManager.clearFocus(force = true)
     }
 
     LazyColumn(
@@ -92,7 +103,7 @@ fun SearchScreen(
                     if (result.isEmpty && suggestions.isNotEmpty()) {
                         SearchSuggestionsBlock(
                             suggestions = suggestions,
-                            onSuggestionClick = onQueryChange
+                            onSuggestionClick = ::chooseSuggestion
                         )
                     }
                     SearchResult(
@@ -100,9 +111,11 @@ fun SearchScreen(
                         direction = searchDirection,
                         result = result,
                         hasSuggestions = suggestions.isNotEmpty(),
+                        displaySettings = displaySettings,
                         proposalRulesAccepted = proposalRulesAccepted,
                         onAcceptProposalRules = onAcceptProposalRules,
                         onEditEntry = onEditEntry,
+                        onEditOldWord = onEditOldWord,
                         onSuggestEntryChange = onSuggestEntryChange
                     )
                 }
@@ -118,24 +131,34 @@ private fun SearchDirectionButtons(
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         SearchDirection.entries.forEach { direction ->
             if (direction == selectedDirection) {
                 Button(
                     onClick = { onDirectionChange(direction) },
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                 ) {
-                    Text(direction.label)
+                    Text(
+                        text = direction.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1
+                    )
                 }
             } else {
                 OutlinedButton(
                     onClick = { onDirectionChange(direction) },
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
                 ) {
-                    Text(direction.label)
+                    Text(
+                        text = direction.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1
+                    )
                 }
             }
         }
@@ -148,9 +171,11 @@ private fun SearchResult(
     direction: SearchDirection,
     result: DictionarySearchResult,
     hasSuggestions: Boolean,
+    displaySettings: DisplaySettings,
     proposalRulesAccepted: Boolean,
     onAcceptProposalRules: () -> Unit,
     onEditEntry: (DictionaryEntry) -> Unit,
+    onEditOldWord: (OldWordEntry) -> Unit,
     onSuggestEntryChange: (DictionaryEntry, String) -> Unit
 ) {
     if (query.isBlank()) {
@@ -186,6 +211,7 @@ private fun SearchResult(
         result.foreignEntry?.let { entry ->
             EntryDetailSurface(
                 entry = entry,
+                displaySettings = displaySettings,
                 proposalRulesAccepted = proposalRulesAccepted,
                 onAcceptProposalRules = onAcceptProposalRules,
                 onEditEntry = onEditEntry,
@@ -200,7 +226,24 @@ private fun SearchResult(
                 fontWeight = FontWeight.SemiBold
             )
             result.replacementMatches.forEach { match ->
-                ReplacementMatchSurface(match)
+                ReplacementMatchSurface(
+                    match = match,
+                    displaySettings = displaySettings
+                )
+            }
+        }
+        if (result.oldWordMatches.isNotEmpty()) {
+            Text(
+                text = "Старе речи са траженом сличнозначницом",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold
+            )
+            result.oldWordMatches.forEach { oldWord ->
+                OldWordDetailSurface(
+                    oldWord = oldWord,
+                    onEditOldWord = onEditOldWord
+                )
             }
         }
     }
@@ -259,6 +302,7 @@ fun ForeignWordDetailScreen(
     modifier: Modifier = Modifier,
     entry: DictionaryEntry,
     statusMessage: String,
+    displaySettings: DisplaySettings,
     proposalRulesAccepted: Boolean,
     onAcceptProposalRules: () -> Unit,
     onEditEntry: (DictionaryEntry) -> Unit,
@@ -284,6 +328,7 @@ fun ForeignWordDetailScreen(
         item {
             EntryDetailSurface(
                 entry = entry,
+                displaySettings = displaySettings,
                 proposalRulesAccepted = proposalRulesAccepted,
                 onAcceptProposalRules = onAcceptProposalRules,
                 onEditEntry = onEditEntry,
@@ -296,6 +341,7 @@ fun ForeignWordDetailScreen(
 @Composable
 fun EntryDetailSurface(
     entry: DictionaryEntry,
+    displaySettings: DisplaySettings = DisplaySettings(),
     proposalRulesAccepted: Boolean = true,
     onAcceptProposalRules: () -> Unit = {},
     onEditEntry: (DictionaryEntry) -> Unit,
@@ -305,6 +351,9 @@ fun EntryDetailSurface(
     var proposalText by rememberSaveable(entry.id) { mutableStateOf("") }
     var proposalValidationMessage by rememberSaveable(entry.id) { mutableStateOf("") }
     var showProposalRulesDialog by rememberSaveable(entry.id) { mutableStateOf(false) }
+    val sortedOptions = entry.options.sortedByReplacementWeight()
+    val shouldShowAddendum = displaySettings.showAddendum ||
+        (sortedOptions.isEmpty() && entry.addendum.isNotBlank())
 
     fun sendProposal() {
         val callback = onSuggestEntryChange ?: return
@@ -374,25 +423,38 @@ fun EntryDetailSurface(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            DetailBlock(label = "Порекло туђице", value = entry.origin, italic = true)
-            ReplacementOptionsBlock(entry.options.sortedByReplacementWeight())
-            DetailBlock(label = "Додатак", value = entry.addendum)
-            OutlinedButton(
-                onClick = { onEditEntry(entry) },
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("Измени")
+            if (displaySettings.showOrigin) {
+                DetailBlock(label = "Порекло туђице", value = entry.origin, italic = true)
             }
-            if (onSuggestEntryChange != null) {
+            if (shouldShowAddendum) {
+                DetailBlock(label = "Додатак", value = entry.addendum, italic = true)
+            }
+            ReplacementOptionsBlock(
+                options = sortedOptions,
+                showExplanations = displaySettings.showExplanations
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 OutlinedButton(
-                    onClick = {
-                        showProposalBox = !showProposalBox
-                        proposalValidationMessage = ""
-                    },
-                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { onEditEntry(entry) },
+                    modifier = if (onSuggestEntryChange != null) Modifier.weight(1f) else Modifier,
                     shape = RoundedCornerShape(8.dp)
                 ) {
-                    Text("Предложи измену")
+                    Text("Измени")
+                }
+                if (onSuggestEntryChange != null) {
+                    OutlinedButton(
+                        onClick = {
+                            showProposalBox = !showProposalBox
+                            proposalValidationMessage = ""
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Предложи измену")
+                    }
                 }
             }
             if (showProposalBox && onSuggestEntryChange != null) {
@@ -449,7 +511,10 @@ fun EntryDetailSurface(
 }
 
 @Composable
-private fun ReplacementOptionsBlock(options: List<ReplacementOption>) {
+private fun ReplacementOptionsBlock(
+    options: List<ReplacementOption>,
+    showExplanations: Boolean
+) {
     if (options.isEmpty()) return
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -469,9 +534,13 @@ private fun ReplacementOptionsBlock(options: List<ReplacementOption>) {
                 modifier = Modifier.padding(10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                options.forEach { option ->
+                if (showExplanations) {
+                    options.forEach { option ->
+                        ReplacementOptionItem(option)
+                    }
+                } else {
                     Text(
-                        text = replacementOptionLine(option),
+                        text = replacementWordsLine(options),
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
@@ -512,19 +581,41 @@ private fun DetailBlock(
     }
 }
 
-private fun replacementOptionLine(option: ReplacementOption) =
-    buildAnnotatedString {
-        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-            append(textWithInitialCapital(option.replacementWord))
+@Composable
+private fun ReplacementOptionItem(option: ReplacementOption) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Surface(
+            shape = RoundedCornerShape(4.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.62f)),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Text(
+                text = option.replacementWord.trim(),
+                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
         }
         if (option.explanation.isNotBlank()) {
-            append(" - ")
-            append(formattedAnnotatedString(option.explanation))
+            Text(
+                text = formattedAnnotatedString(option.explanation),
+                modifier = Modifier.padding(start = 6.dp),
+                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic)
+            )
         }
+    }
+}
+
+private fun replacementWordsLine(options: List<ReplacementOption>) =
+    buildAnnotatedString {
+        append(options.joinToString(", ") { option -> option.replacementWord.trim() })
     }
 
 @Composable
-private fun ReplacementMatchSurface(match: ReplacementSearchMatch) {
+private fun ReplacementMatchSurface(
+    match: ReplacementSearchMatch,
+    displaySettings: DisplaySettings
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -532,14 +623,17 @@ private fun ReplacementMatchSurface(match: ReplacementSearchMatch) {
         color = MaterialTheme.colorScheme.surface
     ) {
         Text(
-            text = replacementMatchLine(match),
+            text = replacementMatchLine(match, displaySettings),
             modifier = Modifier.padding(12.dp),
             style = MaterialTheme.typography.bodyMedium
         )
     }
 }
 
-private fun replacementMatchLine(match: ReplacementSearchMatch) =
+private fun replacementMatchLine(
+    match: ReplacementSearchMatch,
+    displaySettings: DisplaySettings
+) =
     buildAnnotatedString {
         withStyle(
             SpanStyle(
@@ -549,7 +643,7 @@ private fun replacementMatchLine(match: ReplacementSearchMatch) =
         ) {
             append(textWithInitialCapital(match.entry.foreignWord))
         }
-        if (match.entry.origin.isNotBlank()) {
+        if (displaySettings.showOrigin && match.entry.origin.isNotBlank()) {
             append(" (")
             append(match.entry.origin)
             append(")")
@@ -558,7 +652,7 @@ private fun replacementMatchLine(match: ReplacementSearchMatch) =
         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
             append(match.option.replacementWord.trim())
         }
-        if (match.option.explanation.isNotBlank()) {
+        if (displaySettings.showExplanations && match.option.explanation.isNotBlank()) {
             append(" (")
             withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
                 append(formattedAnnotatedString(match.option.explanation))

@@ -3,6 +3,7 @@ package rs.maliprecnik.app
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.HorizontalDivider
@@ -81,21 +82,41 @@ fun PrechnikDrawer(
             onClick = { onNavigate(AppScreen.ForeignWords) }
         )
         DrawerItem(
+            label = "Старе речи",
+            selected = currentScreen == AppScreen.OldWords || currentScreen == AppScreen.OldWord,
+            onClick = { onNavigate(AppScreen.OldWords) }
+        )
+        DrawerItem(
+            label = "Додај туђицу",
+            selected = currentScreen == AppScreen.AddWord,
+            onClick = { onNavigate(AppScreen.AddWord) }
+        )
+        DrawerItem(
+            label = "Додај стару реч",
+            selected = currentScreen == AppScreen.AddOldWord,
+            onClick = { onNavigate(AppScreen.AddOldWord) }
+        )
+        DrawerItem(
             label = "Гласање",
             selected = currentScreen == AppScreen.Voting,
             onClick = { onNavigate(AppScreen.Voting) }
-        )
-        DrawerItem(
-            label = "Додај реч",
-            selected = currentScreen == AppScreen.AddWord,
-            onClick = { onNavigate(AppScreen.AddWord) }
         )
         DrawerItem(
             label = "Складиште",
             selected = currentScreen == AppScreen.Storage,
             onClick = { onNavigate(AppScreen.Storage) }
         )
+        DrawerItem(
+            label = "Подешавања",
+            selected = currentScreen == AppScreen.Settings,
+            onClick = { onNavigate(AppScreen.Settings) }
+        )
         HorizontalDivider()
+        DrawerItem(
+            label = "Захвалница",
+            selected = currentScreen == AppScreen.Acknowledgements,
+            onClick = { onNavigate(AppScreen.Acknowledgements) }
+        )
         DrawerItem(
             label = "Замисао",
             selected = currentScreen == AppScreen.Idea,
@@ -124,6 +145,8 @@ private fun DrawerItem(
         label = { Text(label) },
         selected = selected,
         onClick = onClick,
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+        modifier = Modifier
+            .padding(horizontal = 12.dp, vertical = 1.dp)
+            .height(40.dp)
     )
 }

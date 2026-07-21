@@ -35,10 +35,19 @@ DEFAULT_OFFICIAL = PROJECT_ROOT / "database" / "input" / "official_entries.json"
 DEFAULT_REVIEWED = PROJECT_ROOT / "database" / "input" / "firestore_ready_for_review.json"
 
 JSON_FORMAT = "mali-precnik"
-JSON_VERSION = 6
+JSON_VERSION = 7
 
 SERBIAN_CYRILLIC_ORDER = "абвгдђежзијклљмнњопрстћуфхцчџш"
-SERBIAN_ORDER_INDEX = {letter: index for index, letter in enumerate(SERBIAN_CYRILLIC_ORDER)}
+RUSSIAN_CYRILLIC_AFTER_E = "ё"
+RUSSIAN_CYRILLIC_AFTER_I = "й"
+RUSSIAN_CYRILLIC_EXTRA_ORDER = "щыэюя"
+CYRILLIC_SORT_ORDER = (
+    SERBIAN_CYRILLIC_ORDER
+    .replace("е", f"е{RUSSIAN_CYRILLIC_AFTER_E}", 1)
+    .replace("и", f"и{RUSSIAN_CYRILLIC_AFTER_I}", 1)
+    + RUSSIAN_CYRILLIC_EXTRA_ORDER
+)
+SERBIAN_ORDER_INDEX = {letter: index for index, letter in enumerate(CYRILLIC_SORT_ORDER)}
 
 
 @dataclass(frozen=True)
@@ -186,7 +195,7 @@ def normalize_entries(entries: list[Entry]) -> list[Entry]:
         )
 
     return sorted(
-        (entry for entry in grouped.values() if entry.options),
+        grouped.values(),
         key=lambda entry: serbian_sort_key(entry.foreign_word),
     )
 
@@ -219,7 +228,22 @@ def merge_entries(official_entries: list[Entry], reviewed_entries: list[Entry]) 
     return merged_entries, added_entries, added_options
 
 
-def entries_to_payload(entries: list[Entry]) -> dict[str, object]:
+def old_words_from_json(path: Path) -> list[object]:
+    """
+    Враћа сиров списак старих речи из службеног JSON-а.
+
+    Ова скрипта за сада уређује само туђице и њихове предлоге. Старе речи зато
+    не тумачимо нити мењамо, али их морамо дословно пренети у излаз како
+    спајање Firestore предлога не би обрисало други део складишта.
+    """
+    payload = read_json(path)
+    if not isinstance(payload, dict):
+        return []
+    old_words = payload.get("stare_reci", [])
+    return old_words if isinstance(old_words, list) else []
+
+
+def entries_to_payload(entries: list[Entry], old_words: list[object]) -> dict[str, object]:
     return {
         "format": JSON_FORMAT,
         "version": JSON_VERSION,
@@ -241,6 +265,7 @@ def entries_to_payload(entries: list[Entry]) -> dict[str, object]:
             }
             for entry_index, entry in enumerate(entries, start=1)
         ],
+        "stare_reci": old_words,
     }
 
 
@@ -276,6 +301,7 @@ def main() -> int:
         raise FileNotFoundError(f"Очишћени Firestore JSON не постоји: {args.reviewed}")
 
     official_entries = official_entries_from_json(args.official)
+    official_old_words = old_words_from_json(args.official)
     reviewed_entries = reviewed_entries_from_json(args.reviewed)
     merged_entries, added_entries, added_options = merge_entries(official_entries, reviewed_entries)
 
@@ -285,6 +311,7 @@ def main() -> int:
     print(f"Прегледаних туђица за спајање: {len(reviewed_entries)}")
     print(f"Нових туђица: {added_entries}")
     print(f"Нових српскословенских предлога: {added_options}")
+    print(f"Сачуваних старих речи: {len(official_old_words)}")
 
     if args.dry_run:
         print("Dry run: ништа није уписано.")
@@ -295,7 +322,7 @@ def main() -> int:
         backup_path = backup_file(args.official)
         print(f"Backup: {backup_path}")
 
-    payload = entries_to_payload(merged_entries)
+    payload = entries_to_payload(merged_entries, official_old_words)
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Уписано: {output_path}")
     return 0

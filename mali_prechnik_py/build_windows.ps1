@@ -14,9 +14,10 @@ $entryPoint = Join-Path $pythonProject "app.py"
 $officialEntries = Join-Path $projectRoot "database\input\official_entries.json"
 $googleServices = Join-Path $projectRoot "app\google-services.json"
 $iconPath = Join-Path $projectRoot "app\src\main\res\drawable-xxxhdpi\ic_launcher_prechnik.png"
+$fontDir = Join-Path $projectRoot "app\src\main\res\font"
 $releaseName = "mali-precnik-$Version-windows-x64"
 
-foreach ($requiredPath in ($entryPoint, $officialEntries, $iconPath)) {
+foreach ($requiredPath in ($entryPoint, $officialEntries, $iconPath, $fontDir)) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Недостаје фајл потребан за изградњу: $requiredPath"
     }
@@ -35,7 +36,8 @@ $arguments = @(
     "--paths", $pythonProject,
     "--icon", $iconPath,
     "--add-data", "$officialEntries;database/input",
-    "--add-data", "$iconPath;assets"
+    "--add-data", "$iconPath;assets",
+    "--add-data", "$fontDir;app/src/main/res/font"
 )
 
 if (Test-Path -LiteralPath $googleServices) {

@@ -26,3 +26,23 @@ data class ReplacementOption(
     val explanation: String = "",
     val weight: Int = 1
 )
+
+/**
+ * Стара српска или словенска реч са данашњим сличнозначницама.
+ *
+ * За стару реч не чувамо порекло ни засебна појашњења сличнозначница. `addendum`
+ * је необавезна заједничка напомена, а `synonyms` је списак савременијих речи
+ * преко којих корисник може да је пронађе.
+ */
+data class OldWordEntry(
+    val id: Long = 0,
+    val oldWord: String,
+    val addendum: String = "",
+    val synonyms: List<String>
+)
+
+/** Целокупан преносив садржај личног или јавног складишта. */
+data class DictionaryStorage(
+    val entries: List<DictionaryEntry> = emptyList(),
+    val oldWords: List<OldWordEntry> = emptyList()
+)

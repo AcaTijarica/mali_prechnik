@@ -6,10 +6,14 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+
 private data class FormattedSegment(
     val text: String,
     val styles: Set<String>
 )
+
+private const val URL_ANNOTATION_TAG = "URL"
+private val UrlRegex = Regex("""https?://[^\s<>()]+""")
 
 /**
  * Мали parser за једноставне ознаке у тексту:
@@ -38,7 +42,11 @@ fun formattedAnnotatedString(value: String): AnnotatedString =
                 end
             )
         }
+        addUrlAnnotations()
     }
+
+fun urlAnnotationsAt(value: AnnotatedString, offset: Int): List<AnnotatedString.Range<String>> =
+    value.getStringAnnotations(URL_ANNOTATION_TAG, offset, offset)
 
 private fun formattedSegments(value: String): List<FormattedSegment> {
     val segments = mutableListOf<FormattedSegment>()
@@ -90,3 +98,23 @@ private fun matchingFormatMarker(value: String, index: Int): FormatMarker? =
         value[index] == '*' -> FormatMarker("*", "italic")
         else -> null
     }
+
+private fun AnnotatedString.Builder.addUrlAnnotations() {
+    UrlRegex.findAll(toString()).forEach { match ->
+        val cleanedUrl = match.value.trimEnd('.', ',', ';', ':', '!', '?', ')', ']')
+        if (cleanedUrl.isBlank()) return@forEach
+        val start = match.range.first
+        val end = start + cleanedUrl.length
+        addStringAnnotation(
+            tag = URL_ANNOTATION_TAG,
+            annotation = cleanedUrl,
+            start = start,
+            end = end
+        )
+        addStyle(
+            style = SpanStyle(textDecoration = TextDecoration.Underline),
+            start = start,
+            end = end
+        )
+    }
+}

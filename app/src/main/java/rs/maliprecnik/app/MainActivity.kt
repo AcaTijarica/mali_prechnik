@@ -15,6 +15,7 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private lateinit var database: DictionaryDatabase
     private lateinit var proposalRepository: FirestoreProposalRepository
+    private lateinit var notificationsRepository: FirestoreNotificationsRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -22,43 +23,62 @@ class MainActivity : ComponentActivity() {
         DictionaryDatabase.installSeedDatabaseIfMissing(applicationContext)
         database = DictionaryDatabase(applicationContext)
         proposalRepository = FirestoreProposalRepository(applicationContext)
+        notificationsRepository = FirestoreNotificationsRepository(applicationContext)
         database.ensureInitialData(
-            defaultEntries = loadPackagedDefaultDatabase()
+            defaultStorage = loadPackagedDefaultDatabase()
         )
 
         enableEdgeToEdge()
         setContent {
             // Compose поново исцртава екране када се ова листа замени новом вредношћу.
-            var entries by remember { mutableStateOf(database.getAllEntries()) }
+            val initialStorage = remember { database.getStorage() }
+            var entries by remember { mutableStateOf(initialStorage.entries) }
+            var oldWords by remember { mutableStateOf(initialStorage.oldWords) }
 
-            fun reloadEntries() {
-                entries = database.getAllEntries()
+            fun reloadStorage() {
+                val storage = database.getStorage()
+                entries = storage.entries
+                oldWords = storage.oldWords
             }
 
             PrechnikTheme {
                 PrechnikScreen(
                     entries = entries,
+                    oldWords = oldWords,
                     proposalRepository = proposalRepository,
+                    notificationsRepository = notificationsRepository,
                     publicStorageSizeBytes = packagedAssetSize("prechnik_seed.db"),
                     publicStorageUpdatedMillis = packageLastUpdateTime(),
                     onInsertEntry = { entry ->
                         database.insertEntry(entry)
-                        reloadEntries()
+                        reloadStorage()
+                    },
+                    onInsertOldWord = { oldWord ->
+                        database.insertOldWord(oldWord)
+                        reloadStorage()
                     },
                     onUpdateEntry = { entry ->
                         database.updateEntry(entry)
-                        reloadEntries()
+                        reloadStorage()
+                    },
+                    onUpdateOldWord = { oldWord ->
+                        database.updateOldWord(oldWord)
+                        reloadStorage()
                     },
                     onDeleteEntry = { entryId ->
                         database.deleteEntry(entryId)
-                        reloadEntries()
+                        reloadStorage()
                     },
-                    onReplaceEntries = { importedEntries ->
-                        database.replaceAll(importedEntries)
-                        reloadEntries()
+                    onDeleteOldWord = { oldWordId ->
+                        database.deleteOldWord(oldWordId)
+                        reloadStorage()
                     },
-                    onExportDatabase = { uri, currentEntries ->
-                        exportDatabase(uri, currentEntries)
+                    onReplaceStorage = { importedStorage ->
+                        database.replaceAllStorage(importedStorage)
+                        reloadStorage()
+                    },
+                    onExportDatabase = { uri, currentStorage ->
+                        exportDatabase(uri, currentStorage)
                     },
                     onImportDatabase = { uri ->
                         importDatabase(uri)
@@ -72,9 +92,15 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Извоз тренутних уноса као SQLite база коју може да увезе Android или Python Пречник. */
-    private fun exportDatabase(uri: Uri, entries: List<DictionaryEntry>) {
+    private fun exportDatabase(uri: Uri, storage: DictionaryStorage) {
         val tempFile = File(cacheDir, "prechnik-export.db")
-        database.exportEntriesToDatabaseFile(tempFile, entries.sortedByForeignWord())
+        database.exportStorageToDatabaseFile(
+            tempFile,
+            storage.copy(
+                entries = storage.entries.sortedByForeignWord(),
+                oldWords = storage.oldWords.sortedByOldWord()
+            )
+        )
         contentResolver.openOutputStream(uri)?.use { output ->
             tempFile.inputStream().use { input ->
                 input.copyTo(output)
@@ -84,7 +110,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Увоз SQLite базе кроз Android системски избор датотека. */
-    private fun importDatabase(uri: Uri): List<DictionaryEntry> {
+    private fun importDatabase(uri: Uri): DictionaryStorage {
         val tempFile = File(cacheDir, "prechnik-import.db")
         contentResolver.openInputStream(uri)?.use { input ->
             tempFile.outputStream().use { output ->
@@ -93,14 +119,14 @@ class MainActivity : ComponentActivity() {
         } ?: error("Није могуће прочитати изабрану датотеку.")
 
         return try {
-            database.entriesFromDatabaseFile(tempFile)
+            database.storageFromDatabaseFile(tempFile)
         } finally {
             tempFile.delete()
         }
     }
 
     /** Чита почетну базу из `assets`, али је не уписује ако корисник већ има своју базу. */
-    private fun loadPackagedDefaultDatabase(): List<DictionaryEntry> {
+    private fun loadPackagedDefaultDatabase(): DictionaryStorage {
         val tempFile = File(cacheDir, "prechnik-default.db")
         return runCatching {
             assets.open("prechnik_seed.db").use { input ->
@@ -108,8 +134,8 @@ class MainActivity : ComponentActivity() {
                     input.copyTo(output)
                 }
             }
-            database.entriesFromDatabaseFile(tempFile)
-        }.getOrDefault(emptyList()).also {
+            database.storageFromDatabaseFile(tempFile)
+        }.getOrDefault(DictionaryStorage()).also {
             tempFile.delete()
         }
     }

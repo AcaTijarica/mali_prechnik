@@ -12,6 +12,11 @@ service cloud.firestore {
         && request.resource.data.proposal_text.size() <= 6000;
     }
 
+    match /notifications/{notificationId} {
+      allow get, list: if resource.data.status == 'published';
+      allow create, update, delete: if false;
+    }
+
     match /proposal_groups/{groupId} {
       allow get: if signedIn() || resource.data.status == 'voting';
       allow list: if resource.data.status == 'voting';

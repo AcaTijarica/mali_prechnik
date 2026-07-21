@@ -31,10 +31,12 @@ import androidx.compose.ui.unit.dp
 fun StorageScreen(
     modifier: Modifier = Modifier,
     entries: List<DictionaryEntry>,
+    oldWords: List<OldWordEntry>,
     statusMessage: String,
     databaseSizeBytes: Long,
     databaseLastModifiedMillis: Long,
     publicEntries: List<DictionaryEntry>,
+    publicOldWords: List<OldWordEntry>,
     publicDatabaseSizeBytes: Long,
     publicStorageUpdatedMillis: Long,
     onImportJson: () -> Unit,
@@ -81,7 +83,7 @@ fun StorageScreen(
             title = { Text("Допуна јавним складиштем") },
             text = {
                 Text(
-                    "Ово ће у лично складиште додати само туђице које постоје у јавном складишту, " +
+                    "Ово ће у лично складиште додати само туђице и старе речи које постоје у јавном складишту, " +
                         "а не постоје у личном. Постојеће личне измене се не преписују."
                 )
             },
@@ -113,6 +115,7 @@ fun StorageScreen(
         item {
             StorageCard(title = "Лично складиште") {
                 StatisticLine(label = "Број туђица", value = entries.size.toString())
+                StatisticLine(label = "Број старих речи", value = oldWords.size.toString())
                 StatisticLine(label = "Величина складишта", value = formatByteSize(databaseSizeBytes))
                 StatisticLine(label = "Последња измена", value = formatTimestamp(databaseLastModifiedMillis))
             }
@@ -120,6 +123,7 @@ fun StorageScreen(
         item {
             StorageCard(title = "Јавно складиште") {
                 StatisticLine(label = "Број туђица", value = publicEntries.size.toString())
+                StatisticLine(label = "Број старих речи", value = publicOldWords.size.toString())
                 StatisticLine(label = "Величина складишта", value = formatByteSize(publicDatabaseSizeBytes))
                 StatisticLine(label = "Последње освежавање", value = formatTimestamp(publicStorageUpdatedMillis))
                 OutlinedButton(

@@ -21,23 +21,29 @@ enum class SearchDirection(
     val emptyPrompt: String
 ) {
     ForeignToReplacement(
-        label = "туђица -> српслв",
+        label = "туђица → српслв",
         inputLabel = "Унеси туђицу",
         emptyPrompt = "Унеси туђицу да би се приказале српскословенске речи."
     ),
     ReplacementToForeign(
-        label = "српслв -> туђица",
+        label = "српслв → туђица",
         inputLabel = "Унеси српскословенску реч",
         emptyPrompt = "Унеси српскословенску реч да би се приказале туђице у којима се јавља."
+    ),
+    OldWord(
+        label = "стара реч",
+        inputLabel = "Унеси стару реч или њену сличнозначницу",
+        emptyPrompt = "Унеси стару реч или њену сличнозначницу да би се приказале старе речи."
     )
 }
 
 data class DictionarySearchResult(
     val foreignEntry: DictionaryEntry?,
-    val replacementMatches: List<ReplacementSearchMatch>
+    val replacementMatches: List<ReplacementSearchMatch>,
+    val oldWordMatches: List<OldWordEntry>
 ) {
     val isEmpty: Boolean
-        get() = foreignEntry == null && replacementMatches.isEmpty()
+        get() = foreignEntry == null && replacementMatches.isEmpty() && oldWordMatches.isEmpty()
 }
 
 /**
@@ -48,11 +54,16 @@ data class DictionarySearchResult(
 fun searchDictionary(
     query: String,
     entries: List<DictionaryEntry>,
+    oldWords: List<OldWordEntry>,
     direction: SearchDirection
 ): DictionarySearchResult {
     val normalizedQuery = normalizeWord(query)
     if (normalizedQuery.isBlank()) {
-        return DictionarySearchResult(foreignEntry = null, replacementMatches = emptyList())
+        return DictionarySearchResult(
+            foreignEntry = null,
+            replacementMatches = emptyList(),
+            oldWordMatches = emptyList()
+        )
     }
 
     val foreignEntry = if (direction == SearchDirection.ForeignToReplacement) {
@@ -79,15 +90,26 @@ fun searchDictionary(
         emptyList()
     }
 
+    val oldWordMatches = if (direction == SearchDirection.OldWord) {
+        oldWords.filter { oldWord ->
+            normalizeWord(oldWord.oldWord) == normalizedQuery ||
+                oldWord.synonyms.any { synonym -> normalizeWord(synonym) == normalizedQuery }
+        }.sortedByOldWord()
+    } else {
+        emptyList()
+    }
+
     return DictionarySearchResult(
         foreignEntry = foreignEntry,
-        replacementMatches = replacementMatches
+        replacementMatches = replacementMatches,
+        oldWordMatches = oldWordMatches
     )
 }
 
 fun searchSuggestions(
     query: String,
     entries: List<DictionaryEntry>,
+    oldWords: List<OldWordEntry>,
     direction: SearchDirection,
     limit: Int = 8
 ): List<SearchSuggestion> {
@@ -123,6 +145,24 @@ fun searchSuggestions(
                     value = option.replacementWord,
                     detail = "нпр. ${entry.foreignWord}"
                 )
+            }
+            .take(limit)
+            .toList()
+
+        SearchDirection.OldWord -> oldWords
+            .asSequence()
+            .flatMap { oldWord ->
+                sequence {
+                    yield(SearchSuggestion(value = oldWord.oldWord, detail = "стара реч"))
+                    oldWord.synonyms.forEach { synonym ->
+                        yield(SearchSuggestion(value = synonym, detail = "нпр. ${oldWord.oldWord}"))
+                    }
+                }
+            }
+            .filter { suggestion -> normalizeWord(suggestion.value).startsWith(normalizedQuery) }
+            .distinctBy { suggestion -> normalizeWord(suggestion.value) }
+            .sortedWith { first, second ->
+                serbianCollator.compare(first.value, second.value)
             }
             .take(limit)
             .toList()
@@ -199,6 +239,34 @@ fun List<DictionaryEntry>.withOnlyNewForeignWordsFrom(
         key.isNotBlank() && existingWords.add(key)
     }
     return (this + newEntries).sortedByForeignWord() to newEntries.size
+}
+
+fun List<OldWordEntry>.sortedByOldWord(): List<OldWordEntry> =
+    sortedWith { first, second ->
+        serbianCollator.compare(first.oldWord, second.oldWord)
+    }
+
+fun List<OldWordEntry>.withOnlyNewOldWordsFrom(
+    publicOldWords: List<OldWordEntry>
+): Pair<List<OldWordEntry>, Int> {
+    val existingWords = map { oldWord -> normalizeWord(oldWord.oldWord) }.toMutableSet()
+    val newOldWords = publicOldWords.filter { oldWord ->
+        val key = normalizeWord(oldWord.oldWord)
+        key.isNotBlank() && existingWords.add(key)
+    }
+    return (this + newOldWords).sortedByOldWord() to newOldWords.size
+}
+
+fun List<OldWordEntry>.hasOldWord(
+    oldWord: String,
+    exceptId: Long? = null
+): Boolean {
+    val normalizedWord = normalizeWord(oldWord)
+    if (normalizedWord.isBlank()) return false
+
+    return any { entry ->
+        entry.id != exceptId && normalizeWord(entry.oldWord) == normalizedWord
+    }
 }
 
 fun List<ReplacementOption>.sortedByReplacementWeight(): List<ReplacementOption> =

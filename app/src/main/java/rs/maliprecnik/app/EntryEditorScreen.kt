@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,6 +54,8 @@ fun EntryEditorScreen(
     }
     var validationMessage by rememberSaveable(resetKey) { mutableStateOf("") }
     var showProposalRulesDialog by rememberSaveable(resetKey) { mutableStateOf(false) }
+    var showDeleteDialog by rememberSaveable(resetKey) { mutableStateOf(false) }
+    var pendingRemoveOptionIndex by rememberSaveable(resetKey) { mutableStateOf<Int?>(null) }
 
     fun buildEntryOrShowError(): DictionaryEntry? {
         val foreignWord = foreignWordInput.trim()
@@ -75,11 +78,6 @@ fun EntryEditorScreen(
             }
         }.mapIndexed { optionIndex, option ->
             option.copy(weight = optionIndex + 1)
-        }
-
-        if (options.isEmpty()) {
-            validationMessage = "Потребно је унети бар једну српскословенску реч."
-            return null
         }
 
         validationMessage = ""
@@ -174,8 +172,64 @@ fun EntryEditorScreen(
         )
     }
 
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Уклањање речи") },
+            text = { Text("Да ли заиста желите да уклоните ову реч из складишта?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteDialog = false
+                        onDelete?.invoke()
+                    },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Да")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showDeleteDialog = false },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Не")
+                }
+            }
+        )
+    }
+
+    pendingRemoveOptionIndex?.let { optionIndex ->
+        AlertDialog(
+            onDismissRequest = { pendingRemoveOptionIndex = null },
+            title = { Text("Уклањање предлога") },
+            text = { Text("Да ли желите да уклоните овај предлог?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingRemoveOptionIndex = null
+                        removeOption(optionIndex)
+                    },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Да")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { pendingRemoveOptionIndex = null },
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Не")
+                }
+            }
+        )
+    }
+
     LazyColumn(
-        modifier = modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+        modifier = modifier
+            .imePadding()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
@@ -214,7 +268,7 @@ fun EntryEditorScreen(
                             explanation = explanationInputs.getOrNull(index).orEmpty(),
                             onReplacementChange = { updateReplacement(index, it) },
                             onExplanationChange = { updateExplanation(index, it) },
-                            onRemove = { removeOption(index) },
+                            onRemove = { pendingRemoveOptionIndex = index },
                             onMoveUp = { moveOption(index, -1) },
                             onMoveDown = { moveOption(index, 1) },
                             canMoveUp = index > 0,
@@ -245,6 +299,14 @@ fun EntryEditorScreen(
                         ) {
                             Text(if (initialEntry == null) "Додај" else "Сачувај")
                         }
+                        if (onDelete != null) {
+                            OutlinedButton(
+                                onClick = { showDeleteDialog = true },
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Уклони")
+                            }
+                        }
                         OutlinedButton(
                             onClick = onCancel,
                             shape = RoundedCornerShape(8.dp)
@@ -260,16 +322,6 @@ fun EntryEditorScreen(
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Text(if (initialEntry == null) "Предложи као нову реч" else "Предложи као измену")
-                        }
-                    }
-
-                    if (onDelete != null) {
-                        OutlinedButton(
-                            onClick = onDelete,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("Обриши из складишта")
                         }
                     }
                 }

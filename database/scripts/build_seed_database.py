@@ -35,8 +35,8 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "database" / "generated"
 ANDROID_ASSETS_DIR = PROJECT_ROOT / "app" / "src" / "main" / "assets"
 
 JSON_FORMAT = "mali-precnik"
-JSON_VERSION = 6
-DATABASE_VERSION = 7
+JSON_VERSION = 7
+DATABASE_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE foreign_terms (
@@ -66,10 +66,44 @@ CREATE INDEX index_foreign_terms_word ON foreign_terms(word);
 CREATE INDEX index_replacement_options_word ON replacement_options(replacement_word);
 CREATE INDEX index_replacement_options_normalized_word
     ON replacement_options(normalized_replacement_word);
+
+CREATE TABLE old_words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word TEXT NOT NULL,
+    normalized_word TEXT NOT NULL UNIQUE,
+    addendum TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE old_word_synonyms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_word_id INTEGER NOT NULL,
+    synonym TEXT NOT NULL,
+    normalized_synonym TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(old_word_id)
+        REFERENCES old_words(id)
+        ON DELETE CASCADE,
+    UNIQUE(old_word_id, normalized_synonym)
+);
+
+CREATE INDEX index_old_words_word ON old_words(word);
+CREATE INDEX index_old_word_synonyms_normalized
+    ON old_word_synonyms(normalized_synonym);
 """
 
 SERBIAN_CYRILLIC_ORDER = "абвгдђежзијклљмнњопрстћуфхцчџш"
-SERBIAN_ORDER_INDEX = {letter: index for index, letter in enumerate(SERBIAN_CYRILLIC_ORDER)}
+RUSSIAN_CYRILLIC_AFTER_E = "ё"
+RUSSIAN_CYRILLIC_AFTER_I = "й"
+RUSSIAN_CYRILLIC_EXTRA_ORDER = "щыэюя"
+CYRILLIC_SORT_ORDER = (
+    SERBIAN_CYRILLIC_ORDER
+    .replace("е", f"е{RUSSIAN_CYRILLIC_AFTER_E}", 1)
+    .replace("и", f"и{RUSSIAN_CYRILLIC_AFTER_I}", 1)
+    + RUSSIAN_CYRILLIC_EXTRA_ORDER
+)
+SERBIAN_ORDER_INDEX = {letter: index for index, letter in enumerate(CYRILLIC_SORT_ORDER)}
 
 
 @dataclass(frozen=True)
@@ -86,6 +120,14 @@ class Entry:
     origin: str
     addendum: str
     options: list[Option]
+
+
+@dataclass(frozen=True)
+class OldWord:
+    id: int
+    old_word: str
+    addendum: str
+    synonyms: list[str]
 
 
 def clean_text(value: str | None) -> str:
@@ -154,8 +196,6 @@ def normalize_entries(entries: list[Entry]) -> list[Entry]:
 
     result: list[Entry] = []
     for entry in sorted(groups.values(), key=lambda item: serbian_sort_key(item.foreign_word)):
-        if not entry.options:
-            continue
         result.append(
             Entry(
                 id=len(result) + 1,
@@ -170,6 +210,46 @@ def normalize_entries(entries: list[Entry]) -> list[Entry]:
                     )
                     for option in entry.options
                 ],
+            )
+        )
+    return result
+
+
+def normalize_old_words(old_words: list[OldWord]) -> list[OldWord]:
+    groups: dict[str, OldWord] = {}
+    for old_word in old_words:
+        word = clean_text(old_word.old_word)
+        key = normalize_word(word)
+        if not key:
+            continue
+
+        existing = groups.get(key)
+        synonyms: list[str] = []
+        seen_synonyms: set[str] = set()
+        for synonym in (existing.synonyms if existing else []) + old_word.synonyms:
+            cleaned_synonym = clean_text(synonym)
+            synonym_key = normalize_word(cleaned_synonym)
+            if synonym_key and synonym_key not in seen_synonyms:
+                seen_synonyms.add(synonym_key)
+                synonyms.append(cleaned_synonym)
+
+        groups[key] = OldWord(
+            id=0,
+            old_word=existing.old_word if existing else word,
+            addendum=existing.addendum if existing and existing.addendum else clean_text(old_word.addendum),
+            synonyms=synonyms,
+        )
+
+    result: list[OldWord] = []
+    for old_word in sorted(groups.values(), key=lambda item: serbian_sort_key(item.old_word)):
+        if not old_word.synonyms:
+            continue
+        result.append(
+            OldWord(
+                id=len(result) + 1,
+                old_word=old_word.old_word,
+                addendum=old_word.addendum,
+                synonyms=old_word.synonyms,
             )
         )
     return result
@@ -232,6 +312,32 @@ def read_entries_from_json(path: Path) -> list[Entry]:
     return normalize_entries(entries)
 
 
+def read_old_words_from_json(path: Path) -> list[OldWord]:
+    payload = load_json_with_small_repairs(path)
+    if not isinstance(payload, dict):
+        return []
+
+    old_words: list[OldWord] = []
+    for raw_old_word in payload.get("stare_reci", []):
+        old_word = clean_text(raw_old_word.get("stara_rec") or raw_old_word.get("old_word"))
+        if not old_word:
+            continue
+
+        raw_synonyms = raw_old_word.get("slicnoznacnice") or raw_old_word.get("synonyms") or []
+        if isinstance(raw_synonyms, str):
+            raw_synonyms = re.split(r"[,;]", raw_synonyms)
+        synonyms = [clean_text(value) for value in raw_synonyms if clean_text(value)]
+        old_words.append(
+            OldWord(
+                id=0,
+                old_word=old_word,
+                addendum=clean_text(raw_old_word.get("dodatak") or raw_old_word.get("addendum")),
+                synonyms=synonyms,
+            )
+        )
+    return normalize_old_words(old_words)
+
+
 def read_entries_from_csv(path: Path) -> list[Entry]:
     entries: list[Entry] = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -259,13 +365,13 @@ def read_entries_from_csv(path: Path) -> list[Entry]:
     return normalize_entries(entries)
 
 
-def read_entries(path: Path) -> list[Entry]:
+def read_storage(path: Path) -> tuple[list[Entry], list[OldWord]]:
     if path.suffix.casefold() == ".csv":
-        return read_entries_from_csv(path)
-    return read_entries_from_json(path)
+        return read_entries_from_csv(path), []
+    return read_entries_from_json(path), read_old_words_from_json(path)
 
 
-def write_json(entries: list[Entry], json_path: Path) -> None:
+def write_json(entries: list[Entry], old_words: list[OldWord], json_path: Path) -> None:
     payload = {
         "format": JSON_FORMAT,
         "version": JSON_VERSION,
@@ -287,11 +393,20 @@ def write_json(entries: list[Entry], json_path: Path) -> None:
             }
             for entry in entries
         ],
+        "stare_reci": [
+            {
+                "id": old_word.id,
+                "stara_rec": old_word.old_word,
+                "dodatak": old_word.addendum,
+                "slicnoznacnice": old_word.synonyms,
+            }
+            for old_word in old_words
+        ],
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def write_sqlite(entries: list[Entry], db_path: Path) -> None:
+def write_sqlite(entries: list[Entry], old_words: list[OldWord], db_path: Path) -> None:
     if db_path.exists():
         db_path.unlink()
 
@@ -340,6 +455,43 @@ def write_sqlite(entries: list[Entry], db_path: Path) -> None:
                     for option in entry.options
                 ],
             )
+
+        for old_word in old_words:
+            cursor = connection.execute(
+                """
+                INSERT INTO old_words (id, word, normalized_word, addendum, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    old_word.id,
+                    old_word.old_word,
+                    normalize_word(old_word.old_word),
+                    old_word.addendum,
+                    timestamp,
+                ),
+            )
+            old_word_id = cursor.lastrowid
+            connection.executemany(
+                """
+                INSERT INTO old_word_synonyms (
+                    old_word_id,
+                    synonym,
+                    normalized_synonym,
+                    position,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        old_word_id,
+                        synonym,
+                        normalize_word(synonym),
+                        position,
+                        timestamp,
+                    )
+                    for position, synonym in enumerate(old_word.synonyms)
+                ],
+            )
         connection.commit()
 
 
@@ -361,12 +513,12 @@ def main() -> int:
         raise FileNotFoundError(f"Улазни фајл не постоји: {args.input}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    entries = read_entries(args.input)
+    entries, old_words = read_storage(args.input)
 
     db_path = args.out_dir / "prechnik_seed.db"
     json_path = args.out_dir / "prechnik_seed.json"
-    write_sqlite(entries, db_path)
-    write_json(entries, json_path)
+    write_sqlite(entries, old_words, db_path)
+    write_json(entries, old_words, json_path)
 
     if args.copy_to_android_assets:
         ANDROID_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -376,6 +528,7 @@ def main() -> int:
     option_count = sum(len(entry.options) for entry in entries)
     print(f"Туђица: {len(entries)}")
     print(f"Српскословенских предлога: {option_count}")
+    print(f"Старих речи: {len(old_words)}")
     print(f"SQLite: {db_path}")
     print(f"JSON: {json_path}")
     if args.copy_to_android_assets:

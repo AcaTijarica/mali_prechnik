@@ -11,16 +11,21 @@ fun PrechnikPreview() {
     PrechnikTheme {
         PrechnikScreen(
             entries = emptyList(),
+            oldWords = emptyList(),
             proposalRepository = FirestoreProposalRepository(LocalContext.current),
+            notificationsRepository = FirestoreNotificationsRepository(LocalContext.current),
             publicStorageSizeBytes = 0L,
             publicStorageUpdatedMillis = 0L,
             onInsertEntry = {},
+            onInsertOldWord = {},
             onUpdateEntry = {},
+            onUpdateOldWord = {},
             onDeleteEntry = {},
-            onReplaceEntries = {},
+            onDeleteOldWord = {},
+            onReplaceStorage = {},
             onExportDatabase = { _, _ -> },
-            onImportDatabase = { emptyList() },
-            onLoadPackagedDatabase = { emptyList() }
+            onImportDatabase = { DictionaryStorage() },
+            onLoadPackagedDatabase = { DictionaryStorage() }
         )
     }
 }
